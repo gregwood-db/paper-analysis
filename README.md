@@ -17,13 +17,13 @@ cp .env.example .env
 
 Place inputs locally (not committed):
 
-- `data/paper.pdf` — source paper (e.g. Dorado-Morales 2021)
+- `data/paper.pdf` — source paper
 - `data/ground_truth.xlsx` — spreadsheet with Runs / Measurements sheets
 - `artifacts/text/` — created by `extract-text` / `analyze-text` (under `.gitignore` with other `artifacts/`)
 
 ## Configuration
 
-Edit `[config/poc.yaml](config/poc.yaml)`:
+Edit `config/poc.yaml`:
 
 - `pdf.path` — path to the PDF (default `data/paper.pdf`)
 - `figures` — each target: `id`, `page` (1-based), `plot_type` (`box_plot` | `line_chart` | `line_plot` | `table_image` | `plasmid_map` | `workflow_diagram` | `experimental_workflow`), and either `bbox_pdf` (x0,y0,x1,y1 in PDF points) or `bbox_norm` (0–1 fractions of page width/height). `line_plot` is an alias of `line_chart` (same JSON schema and prompts). Use `plasmid_map` for vector maps, `workflow_diagram` for generic flowcharts, and `experimental_workflow` for lab / study-protocol pipeline figures (not numeric charts). Optional `skip: true` on an entry skips both cropping and vision for that id (decorative bitmaps, logos, non-data panels).
