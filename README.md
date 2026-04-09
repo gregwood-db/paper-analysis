@@ -18,7 +18,7 @@ cp .env.example .env
 Place inputs locally (not committed):
 
 - `data/paper.pdf` — source paper
-- `data/ground_truth.xlsx` — spreadsheet with Runs / Measurements sheets
+- `data/ground_truth.xlsx` — spreadsheet with Runs / Measurements sheets (optional- for model evaluation)
 - `artifacts/text/` — created by `extract-text` / `analyze-text` (under `.gitignore` with other `artifacts/`)
 
 ## Configuration
