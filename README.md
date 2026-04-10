@@ -81,13 +81,16 @@ Some papers render a table as a graphic (screenshot-style or flattened artwork).
 Targets experimental findings expressed as selectable PDF text and native text tables (PyMuPDF `find_tables()`), which often carry numbers that also appear in a Measurements sheet (e.g. “Table 2”, inline results). This is separate from figure vision (plots, `table_image`).
 
 
-| Step       | Command                                                | Output                                                                                                                                                                                                                                                             |
-| ---------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1. Dump    | `paper-analysis extract-text --config config/poc.yaml` | `artifacts/text/pages.json` (per-page plain text), `artifacts/text/tables.json` (detected tables with rows). No API key.                                                                                                                                           |
-| 2. Analyze | `paper-analysis analyze-text --config config/poc.yaml` | `artifacts/text/candidate_measurements.json` — LLM-structured list (`TextMeasurementCandidate`: `field_name`, `raw_value`, `source_in_paper`, `source_type` = `table` | `body_text`, etc.). Run before `export-results` if you want those rows in the Excel sheet. |
+| Step       | Command                                                 | Output                                                                                                                                                                                                                                                             |
+| ---------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1. Dump    | `paper-analysis extract-text --config config/poc.yaml`  | `artifacts/text/pages.json` (per-page plain text), `artifacts/text/tables.json` (detected tables with rows). No API key.                                                                                                                                           |
+| 2. Analyze | `paper-analysis analyze-text --config config/poc.yaml`  | `artifacts/text/candidate_measurements.json` — LLM-structured list (`TextMeasurementCandidate`: `field_name`, `raw_value`, `source_in_paper`, `source_type` = `table` | `body_text`, etc.). Run before `export-results` if you want those rows in the Excel sheet. |
+| 3. Runs    | `paper-analysis extract-runs --config config/poc.yaml`  | `artifacts/text/candidate_runs.json` — LLM-structured list of experimental run metadata (`RunMetadataCandidate`: protocol details, strain/plasmid info, measured outcomes). Run before `export-results` if you want the Extracted_Runs sheet in the Excel workbook. |
 
 
-Limits: `find_tables` misses some publisher layouts; complex tables may need pdfplumber/Camelot later. Body text beyond `text.max_context_chars` is head+tail truncated for the LLM. `evaluate` does not yet score text candidates against the spreadsheet—merge or validate in a follow-up step.
+**Run metadata extraction** (step 3) identifies each distinct experimental condition in the paper — every unique combination of experiment type, strain, plasmid, and treatment — and extracts structured metadata: protocol parameters (temperature, media, duration, replicates), biological details (species, strain, sequence type, plasmid characteristics, resistance genes), and what was measured. The LLM assigns sequential `Run_ID` values (`RUN_001`, `RUN_002`, …) and derives a `Paper_ID` from the first author and year. This mirrors the Runs sheet in a typical ground-truth spreadsheet. Requires `extract-text` first (same `pages.json` + `tables.json` input as `analyze-text`).
+
+Limits: `find_tables` misses some publisher layouts; complex tables may need pdfplumber/Camelot later. Body text beyond `text.max_context_chars` is head+tail truncated for the LLM. `evaluate` does not yet score text candidates or run metadata against the spreadsheet—merge or validate in a follow-up step.
 
 ## CLI
 
@@ -131,7 +134,10 @@ paper-analysis evaluate --config config/poc.yaml
 paper-analysis extract-text --config config/poc.yaml
 paper-analysis analyze-text --config config/poc.yaml
 
-# Export one Measurements-style sheet: merges vision JSON + text candidates (if present) + native table cells (if configured)
+# Run metadata: extract structured experiment conditions (requires extract-text first).
+paper-analysis extract-runs --config config/poc.yaml
+
+# Export Measurements + Runs sheets: merges vision JSON + text candidates (if present) + native table cells (if configured) + run metadata (if present)
 paper-analysis export-results --config config/poc.yaml
 # Same as extract-figures / run-vision: limit vision rows to a saved `figures:` file
 paper-analysis export-results --config config/poc.yaml --figures-config config/discovered_figures.yaml
@@ -149,12 +155,14 @@ Environment:
 - `artifacts/text/pages.json` — raw page text from `extract-text`
 - `artifacts/text/tables.json` — native tables from `find_tables`
 - `artifacts/text/candidate_measurements.json` — text LLM candidates from `analyze-text` (`[text_schemas.py](src/paper_analysis/text_schemas.py)`)
+- `artifacts/text/candidate_runs.json` — run metadata from `extract-runs` (`[runs_schemas.py](src/paper_analysis/runs_schemas.py)`)
 
-`export-results` writes `export.output_path` (default `artifacts/export/extractions.xlsx`) with two sheets:
+`export-results` writes `export.output_path` (default `artifacts/export/extractions.xlsx`) with up to three sheets:
 
 - Extracted_Measurements — columns aligned with a typical ground-truth Measurements sheet (`Run_ID`, `Field_name`, `Raw_value`, `Raw_units`, `Source_in_paper`, `Notes`) plus provenance: `Extraction_pipeline` (`figure_vision` | `text_llm` | `native_pdf_table`), `Extraction_method` (e.g. `box_plot_median`, `line_chart_point`, `line_plot_point`, `table_image_cell`, `plasmid_map_feature`, `workflow_diagram_node`, `experimental_workflow_node`, `text_llm_candidate`, `native_table_cell`), `Source_artifact` (path to the JSON), `Source_id`, `Plot_type`, `Page` (from `pNNN`_-style figure ids when present), `Axis_or_context`, `Confidence`, `Supporting_evidence`.
+- Extracted_Runs (when `candidate_runs.json` exists) — columns aligned with a typical ground-truth Runs sheet: `Run_ID`, `Run_description`, `Paper_ID`, `experiment_type`, `temperature`, `media`, `culture_format`, `shaking_speed_rpm`, `duration_h`, `replicates_biological`, `selection_antibiotic`, `selection_concentration`, `initial_dilution`, `species`, `strain_id`, `sequence_type`, `isolation_source`, `plasmid_name`, `plasmid_family`, `plasmid_size_kb`, `conjugative`, `resistance_genes`, `plasmid_accession`, `measured_outcomes`, `supporting_evidence`, `confidence`.
 - Export_Meta — export timestamp, PDF path, row counts, flags.
 
-Vision rows come from every `artifacts/extractions/*.json` (or only ids in `--figures-config` when passed). Text LLM rows require `analyze-text` to have run first so `artifacts/text/candidate_measurements.json` exists; otherwise export still succeeds with only vision (and native-table) rows. Native table rows need `extract-text` (for `tables.json`) when `export.include_native_pdf_tables` is true.
+Vision rows come from every `artifacts/extractions/*.json` (or only ids in `--figures-config` when passed). Text LLM rows require `analyze-text` to have run first so `artifacts/text/candidate_measurements.json` exists; otherwise export still succeeds with only vision (and native-table) rows. Native table rows need `extract-text` (for `tables.json`) when `export.include_native_pdf_tables` is true. Run metadata rows require `extract-runs` to have run first so `artifacts/text/candidate_runs.json` exists; otherwise export proceeds without the Extracted_Runs sheet.
 
 A later mapper can still join these rows into canonical Runs / Measurements with human-assigned `Run_ID` and tighter `Source_in_paper` phrasing to match a specific spreadsheet.

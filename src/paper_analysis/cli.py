@@ -23,6 +23,7 @@ from paper_analysis.pdf_discovery import (
 )
 from paper_analysis.pdf_figures import extract_all_figures, list_page_images
 from paper_analysis.pdf_text_tables import build_llm_context, load_text_artifacts, run_text_dump
+from paper_analysis.runs_analyze_llm import run_runs_analysis
 from paper_analysis.text_analyze_llm import run_text_analysis
 from paper_analysis.vision.base import build_vision_client
 
@@ -133,6 +134,28 @@ def analyze_text_cmd(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(batch.model_dump_json(indent=2), encoding="utf-8")
     typer.echo(f"wrote {out} ({len(batch.candidates)} candidates)")
+
+
+@app.command("extract-runs")
+def extract_runs_cmd(
+    config: Path = typer.Option(Path("config/poc.yaml"), "--config", "-c", exists=True),
+) -> None:
+    """LLM pass: read pages.json + tables.json and write candidate_runs.json (uses API key)."""
+    cfg = _load_cfg(config)
+    tc = effective_text_config(cfg)
+    try:
+        pages, tables = load_text_artifacts(tc)
+    except FileNotFoundError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
+    content = build_llm_context(pages, tables, tc.max_context_chars)
+    provider = cfg.vision.provider or os.environ.get("PAPER_ANALYSIS_VISION_PROVIDER", "anthropic")
+    model = tc.llm_model or cfg.vision.model
+    batch = run_runs_analysis(content, provider=provider, model=model, max_retries=1)
+    out = tc.output_dir / "candidate_runs.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(batch.model_dump_json(indent=2), encoding="utf-8")
+    typer.echo(f"wrote {out} ({len(batch.candidates)} runs)")
 
 
 @app.command("inspect-sheet")

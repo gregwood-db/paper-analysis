@@ -8,8 +8,14 @@ from typing import Any
 
 import pandas as pd
 
-from paper_analysis.config import ExportConfig, PocConfig, effective_export_config, effective_text_config
+from paper_analysis.config import (
+    ExportConfig,
+    PocConfig,
+    effective_export_config,
+    effective_text_config,
+)
 from paper_analysis.evaluate import load_extraction
+from paper_analysis.runs_schemas import RunExtractionBatch
 from paper_analysis.schemas import (
     BoxPlotExtraction,
     ExperimentalWorkflowExtraction,
@@ -19,9 +25,9 @@ from paper_analysis.schemas import (
     UnknownPlotExtraction,
     WorkflowDiagramExtraction,
 )
+from paper_analysis.text_schemas import TextExtractionBatch
 
 _MAX_UNKNOWN_RAW_NOTE_CHARS = 8000
-from paper_analysis.text_schemas import TextExtractionBatch
 
 # Core columns align with typical ground-truth Measurements; trailing columns are extraction metadata.
 MEASUREMENT_COLUMNS: list[str] = [
@@ -605,6 +611,58 @@ def rows_from_native_tables(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+RUN_COLUMNS: list[str] = [
+    "Run_ID",
+    "Run_description",
+    "Paper_ID",
+    "experiment_type",
+    "temperature",
+    "media",
+    "culture_format",
+    "shaking_speed_rpm",
+    "duration_h",
+    "replicates_biological",
+    "selection_antibiotic",
+    "selection_concentration",
+    "initial_dilution",
+    "species",
+    "strain_id",
+    "sequence_type",
+    "isolation_source",
+    "plasmid_name",
+    "plasmid_family",
+    "plasmid_size_kb",
+    "conjugative",
+    "resistance_genes",
+    "plasmid_accession",
+    "measured_outcomes",
+    "supporting_evidence",
+    "confidence",
+]
+
+
+def rows_from_run_candidates(path: Path) -> list[dict[str, str]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        batch = RunExtractionBatch.model_validate(raw)
+    except Exception as e:  # noqa: BLE001
+        return [{"Run_ID": "(parse_error)", "Run_description": str(e)}]
+
+    rows: list[dict[str, str]] = []
+    for c in batch.candidates:
+        row: dict[str, str] = {}
+        for col in RUN_COLUMNS:
+            field = col.lower() if col not in ("Run_ID", "Run_description", "Paper_ID") else {
+                "Run_ID": "run_id",
+                "Run_description": "run_description",
+                "Paper_ID": "paper_id",
+            }[col]
+            val = getattr(c, field, None)
+            row[col] = "" if val is None else str(val)
+        rows.append(row)
+    return rows
+
+
 def list_extraction_jsons(dir_path: Path, allowed_ids: set[str] | None) -> list[Path]:
     paths = sorted(dir_path.glob("*.json"))
     if allowed_ids is None:
@@ -638,7 +696,9 @@ def build_export_rows(
     return rows
 
 
-def export_meta_dataframe(cfg: PocConfig, row_count: int, export_cfg: ExportConfig) -> pd.DataFrame:
+def export_meta_dataframe(
+    cfg: PocConfig, row_count: int, export_cfg: ExportConfig, *, run_count: int = 0
+) -> pd.DataFrame:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     items: list[tuple[str, str]] = [
         ("exported_at_utc", now),
@@ -646,8 +706,17 @@ def export_meta_dataframe(cfg: PocConfig, row_count: int, export_cfg: ExportConf
         ("extractions_dir", _rel_path(cfg.artifacts.extractions_dir)),
         ("include_native_pdf_tables", str(export_cfg.include_native_pdf_tables)),
         ("measurement_row_count", str(row_count)),
+        ("run_row_count", str(run_count)),
     ]
     return pd.DataFrame(items, columns=["Key", "Value"])
+
+
+def build_run_rows(cfg: PocConfig) -> list[dict[str, str]]:
+    tc = effective_text_config(cfg)
+    runs_path = tc.output_dir / "candidate_runs.json"
+    if runs_path.is_file():
+        return rows_from_run_candidates(runs_path)
+    return []
 
 
 def export_workbook(
@@ -663,10 +732,20 @@ def export_workbook(
         if col not in df.columns:
             df[col] = ""
     df = df[MEASUREMENT_COLUMNS]
-    meta = export_meta_dataframe(cfg, len(rows), ec)
+
+    run_rows = build_run_rows(cfg)
+    df_runs = pd.DataFrame(run_rows, columns=RUN_COLUMNS)
+    for col in RUN_COLUMNS:
+        if col not in df_runs.columns:
+            df_runs[col] = ""
+    df_runs = df_runs[RUN_COLUMNS]
+
+    meta = export_meta_dataframe(cfg, len(rows), ec, run_count=len(run_rows))
     out = ec.output_path
     out.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="Extracted_Measurements", index=False)
+        if not df_runs.empty:
+            df_runs.to_excel(writer, sheet_name="Extracted_Runs", index=False)
         meta.to_excel(writer, sheet_name="Export_Meta", index=False)
     return out
