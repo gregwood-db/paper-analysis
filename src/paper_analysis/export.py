@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 
+from paper_analysis.combined_schemas import CombinedExtractionBatch
 from paper_analysis.config import (
     ExportConfig,
     PocConfig,
@@ -663,6 +664,84 @@ def rows_from_run_candidates(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+COMBINED_COLUMNS: list[str] = [
+    "Measurement_ID",
+    "Run_ID",
+    "Paper_ID",
+    "experiment_type",
+    "species",
+    "strain_id",
+    "plasmid_name",
+    "plasmid_family",
+    "plasmid_size",
+    "mobilization_type",
+    "medium",
+    "temperature",
+    "culture_format",
+    "replicates_biological",
+    "selection_antibiotic",
+    "Run_description",
+    "Field_name",
+    "Measurement_time_h",
+    "Raw_value",
+    "Raw_units",
+    "Normalized_value",
+    "Normalized_units",
+    "dispersion_value",
+    "dispersion_type",
+    "Source_in_paper",
+    "Confidence",
+]
+
+
+def rows_from_combined_candidates(path: Path) -> list[dict[str, str]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        batch = CombinedExtractionBatch.model_validate(raw)
+    except Exception as e:  # noqa: BLE001
+        return [{"Measurement_ID": "(parse_error)", "Run_ID": "", "Notes": str(e)}]
+
+    rows: list[dict[str, str]] = []
+    for c in batch.candidates:
+        rows.append({
+            "Measurement_ID": c.measurement_id,
+            "Run_ID": c.run_id,
+            "Paper_ID": c.paper_id,
+            "experiment_type": c.experiment_type,
+            "species": "" if c.species is None else str(c.species),
+            "strain_id": "" if c.strain_id is None else str(c.strain_id),
+            "plasmid_name": "" if c.plasmid_name is None else str(c.plasmid_name),
+            "plasmid_family": "" if c.plasmid_family is None else str(c.plasmid_family),
+            "plasmid_size": "" if c.plasmid_size is None else str(c.plasmid_size),
+            "mobilization_type": "" if c.mobilization_type is None else str(c.mobilization_type),
+            "medium": "" if c.medium is None else str(c.medium),
+            "temperature": "" if c.temperature is None else str(c.temperature),
+            "culture_format": "" if c.culture_format is None else str(c.culture_format),
+            "replicates_biological": "" if c.replicates_biological is None else str(c.replicates_biological),
+            "selection_antibiotic": "" if c.selection_antibiotic is None else str(c.selection_antibiotic),
+            "Run_description": c.run_description,
+            "Field_name": c.field_name,
+            "Measurement_time_h": "" if c.measurement_time_h is None else str(c.measurement_time_h),
+            "Raw_value": "" if c.raw_value is None else str(c.raw_value),
+            "Raw_units": "" if c.raw_units is None else str(c.raw_units),
+            "Normalized_value": "" if c.normalized_value is None else str(c.normalized_value),
+            "Normalized_units": "" if c.normalized_units is None else str(c.normalized_units),
+            "dispersion_value": "" if c.dispersion_value is None else str(c.dispersion_value),
+            "dispersion_type": "" if c.dispersion_type is None else str(c.dispersion_type),
+            "Source_in_paper": c.source_in_paper,
+            "Confidence": c.confidence or "",
+        })
+    return rows
+
+
+def build_combined_rows(cfg: PocConfig) -> list[dict[str, str]]:
+    tc = effective_text_config(cfg)
+    combined_path = tc.output_dir / "candidate_combined.json"
+    if combined_path.is_file():
+        return rows_from_combined_candidates(combined_path)
+    return []
+
+
 def list_extraction_jsons(dir_path: Path, allowed_ids: set[str] | None) -> list[Path]:
     paths = sorted(dir_path.glob("*.json"))
     if allowed_ids is None:
@@ -697,7 +776,12 @@ def build_export_rows(
 
 
 def export_meta_dataframe(
-    cfg: PocConfig, row_count: int, export_cfg: ExportConfig, *, run_count: int = 0
+    cfg: PocConfig,
+    row_count: int,
+    export_cfg: ExportConfig,
+    *,
+    run_count: int = 0,
+    combined_count: int = 0,
 ) -> pd.DataFrame:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     items: list[tuple[str, str]] = [
@@ -707,6 +791,7 @@ def export_meta_dataframe(
         ("include_native_pdf_tables", str(export_cfg.include_native_pdf_tables)),
         ("measurement_row_count", str(row_count)),
         ("run_row_count", str(run_count)),
+        ("combined_row_count", str(combined_count)),
     ]
     return pd.DataFrame(items, columns=["Key", "Value"])
 
@@ -740,12 +825,27 @@ def export_workbook(
             df_runs[col] = ""
     df_runs = df_runs[RUN_COLUMNS]
 
-    meta = export_meta_dataframe(cfg, len(rows), ec, run_count=len(run_rows))
+    combined_rows = build_combined_rows(cfg)
+    df_combined = pd.DataFrame(combined_rows, columns=COMBINED_COLUMNS)
+    for col in COMBINED_COLUMNS:
+        if col not in df_combined.columns:
+            df_combined[col] = ""
+    df_combined = df_combined[COMBINED_COLUMNS]
+
+    meta = export_meta_dataframe(
+        cfg,
+        len(rows),
+        ec,
+        run_count=len(run_rows),
+        combined_count=len(combined_rows),
+    )
     out = ec.output_path
     out.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="Extracted_Measurements", index=False)
         if not df_runs.empty:
             df_runs.to_excel(writer, sheet_name="Extracted_Runs", index=False)
+        if not df_combined.empty:
+            df_combined.to_excel(writer, sheet_name="Combined_Runs_Measurements", index=False)
         meta.to_excel(writer, sheet_name="Export_Meta", index=False)
     return out

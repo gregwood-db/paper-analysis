@@ -40,22 +40,40 @@ def _coerce_unknown(raw: dict[str, Any], declared: object) -> UnknownPlotExtract
     return UnknownPlotExtraction(declared_plot_type=dt, raw=dict(raw))
 
 
+_PLOT_TYPE_ALIASES: dict[str, str] = {
+    "line_plot": "line_chart",
+    "circular_genome_map": "plasmid_map",
+    "genome_map": "plasmid_map",
+    "vector_map": "plasmid_map",
+    "schematic_diagram": "workflow_diagram",
+    "schematic": "workflow_diagram",
+    "flow_diagram": "workflow_diagram",
+    "flowchart": "workflow_diagram",
+    "protocol_diagram": "experimental_workflow",
+    "bar_chart": "box_plot",
+    "bar_plot": "box_plot",
+}
+
+
 def parse_extraction_dict(data: dict[str, Any], *, context: str) -> ExtractionModel:
     """Route parsed JSON to the correct Pydantic model; unknown types become UnknownPlotExtraction with a warning."""
     pt = data.get("plot_type")
-    if pt == "unknown":
+    canonical = _PLOT_TYPE_ALIASES.get(pt, pt) if isinstance(pt, str) else pt
+    if canonical != pt and isinstance(pt, str):
+        data = {**data, "plot_type": canonical}
+    if canonical == "unknown":
         return UnknownPlotExtraction.model_validate(data)
-    if pt == "box_plot":
+    if canonical == "box_plot":
         return BoxPlotExtraction.model_validate(data)
-    if pt in ("line_chart", "line_plot"):
+    if canonical == "line_chart":
         return LineChartExtraction.model_validate(data)
-    if pt == "table_image":
+    if canonical == "table_image":
         return TableImageExtraction.model_validate(data)
-    if pt == "plasmid_map":
+    if canonical == "plasmid_map":
         return PlasmidMapExtraction.model_validate(data)
-    if pt == "workflow_diagram":
+    if canonical == "workflow_diagram":
         return WorkflowDiagramExtraction.model_validate(data)
-    if pt == "experimental_workflow":
+    if canonical == "experimental_workflow":
         return ExperimentalWorkflowExtraction.model_validate(data)
     warn_unknown_plot_type(pt, context=context)
     return _coerce_unknown(data, pt)

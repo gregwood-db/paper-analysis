@@ -185,3 +185,140 @@ def load_text_artifacts(text_cfg: TextPipelineConfig) -> tuple[list[dict], list[
     pages = json.loads(p.read_text(encoding="utf-8"))
     tables = json.loads(t.read_text(encoding="utf-8"))
     return pages, tables
+
+
+def _page_from_stem(stem: str) -> str:
+    """Extract page number from a figure id like 'p008_fig01'."""
+    import re
+
+    m = re.match(r"^p(\d+)_", stem)
+    return str(int(m.group(1))) if m else "?"
+
+
+def _summarize_box_plot(data: dict[str, Any]) -> str:
+    y = data.get("axis_y_label") or "?"
+    y_units = data.get("axis_y_units") or ""
+    x = data.get("axis_x_label") or ""
+    groups = data.get("groups", [])
+    if not groups:
+        return f"  Y-axis: {y} ({y_units})\n  No groups extracted."
+    lines = [f"  Y-axis: {y}" + (f" ({y_units})" if y_units else "")]
+    if x:
+        lines.append(f"  X-axis: {x}")
+    for g in groups:
+        med = g.get("median")
+        q1 = g.get("q1")
+        q3 = g.get("q3")
+        parts = [f"median={med}"]
+        if q1 is not None and q3 is not None:
+            parts.append(f"IQR={q1}-{q3}")
+        sig = g.get("significance")
+        if sig:
+            parts.append(f"sig={sig}")
+        lines.append(f"  - {g['label']}: {', '.join(parts)}")
+    return "\n".join(lines)
+
+
+def _summarize_line_chart(data: dict[str, Any]) -> str:
+    y = data.get("axis_y_label") or "?"
+    y_units = data.get("axis_y_units") or ""
+    x = data.get("axis_x_label") or "?"
+    x_units = data.get("axis_x_units") or ""
+    series = data.get("series", [])
+    lines = [
+        f"  Y-axis: {y}" + (f" ({y_units})" if y_units else ""),
+        f"  X-axis: {x}" + (f" ({x_units})" if x_units else ""),
+    ]
+    if not series:
+        lines.append("  No series data extracted.")
+        return "\n".join(lines)
+    for s in series:
+        name = s.get("name") or "unnamed"
+        pts = s.get("points", [])
+        if not pts:
+            lines.append(f"  - Series '{name}': no data points")
+            continue
+        pt_strs = [f"({p['x']}, {p['y']})" for p in pts]
+        lines.append(f"  - Series '{name}' ({len(pts)} pts): {', '.join(pt_strs)}")
+    return "\n".join(lines)
+
+
+def _summarize_table_image(data: dict[str, Any]) -> str:
+    headers = data.get("column_headers", [])
+    rows = data.get("rows", [])
+    caption = data.get("title_or_caption") or ""
+    lines = []
+    if caption:
+        lines.append(f"  Caption: {caption}")
+    if headers:
+        lines.append(f"  Headers: {' | '.join(headers)}")
+    for ri, row in enumerate(rows):
+        lines.append(f"  Row {ri + 1}: {' | '.join(str(c) for c in row)}")
+    return "\n".join(lines) if lines else "  (empty table)"
+
+
+def _summarize_one_extraction(stem: str, data: dict[str, Any]) -> str:
+    """Produce a concise text summary for one vision extraction JSON."""
+    page = _page_from_stem(stem)
+    pt = data.get("plot_type", "unknown")
+
+    header = f"Figure {stem} (page {page}, {pt}):"
+
+    if pt == "box_plot":
+        return f"{header}\n{_summarize_box_plot(data)}"
+    if pt in ("line_chart", "line_plot"):
+        return f"{header}\n{_summarize_line_chart(data)}"
+    if pt == "table_image":
+        return f"{header}\n{_summarize_table_image(data)}"
+    if pt == "plasmid_map":
+        name = data.get("map_name_or_identifier") or "?"
+        features = data.get("features", [])
+        feat_str = ", ".join(f["label"] for f in features[:10])
+        return f"{header}\n  Map: {name}, {len(features)} features: {feat_str}"
+    if pt in ("workflow_diagram", "experimental_workflow"):
+        nodes = data.get("nodes", [])
+        node_str = ", ".join(n["label"] for n in nodes[:8])
+        return f"{header}\n  {len(nodes)} nodes: {node_str}"
+    if pt == "unknown":
+        declared = data.get("declared_plot_type", "?")
+        return f"{header}\n  (unregistered type: {declared})"
+    return f"{header}\n  (no summarizer for {pt})"
+
+
+def build_figure_summary(extractions_dir: Path) -> str:
+    """Read all vision extraction JSONs and return a text summary for LLM context.
+
+    Only includes figures with extractable data (box plots, line charts,
+    table images). Skips empty or non-data figures to conserve tokens.
+    """
+    if not extractions_dir.is_dir():
+        return ""
+    paths = sorted(extractions_dir.glob("*.json"))
+    if not paths:
+        return ""
+
+    parts: list[str] = []
+    for p in paths:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        pt = data.get("plot_type", "unknown")
+        # Skip non-data figures to keep context focused
+        if pt in ("workflow_diagram", "experimental_workflow", "unknown"):
+            continue
+        if pt == "plasmid_map" and not data.get("features"):
+            continue
+        # Skip box plots with no groups or all-null medians
+        if pt == "box_plot":
+            groups = data.get("groups", [])
+            if not groups or all(g.get("median") is None for g in groups):
+                continue
+        # Skip line charts with no series data
+        if pt in ("line_chart", "line_plot") and not data.get("series"):
+            continue
+        parts.append(_summarize_one_extraction(p.stem, data))
+
+    if not parts:
+        return ""
+    return "--- FIGURE EXTRACTIONS (from vision pipeline) ---\n\n" + "\n\n".join(parts)
