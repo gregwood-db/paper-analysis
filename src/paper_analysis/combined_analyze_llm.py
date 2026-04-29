@@ -11,7 +11,7 @@ from paper_analysis.combined_prompts import COMBINED_JSON_FIX, COMBINED_SYSTEM, 
 from paper_analysis.combined_schemas import CombinedExtractionBatch
 from paper_analysis.vision.base import load_json_object_from_model_text
 
-_MAX_TOKENS = 32768
+_MAX_TOKENS = 64000
 
 
 def parse_combined_extraction_batch(text: str) -> CombinedExtractionBatch:

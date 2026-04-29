@@ -285,11 +285,34 @@ def _summarize_one_extraction(stem: str, data: dict[str, Any]) -> str:
     return f"{header}\n  (no summarizer for {pt})"
 
 
+def _build_page_figure_map(text_dir: Path) -> dict[int, list[str]]:
+    """Scan pages.json to map PDF page numbers to paper figure labels."""
+    import re
+
+    pages_path = text_dir / "pages.json"
+    if not pages_path.is_file():
+        return {}
+    try:
+        pages = json.loads(pages_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    mapping: dict[int, list[str]] = {}
+    fig_re = re.compile(r"^FIG\.?\s*(\d+|S\d+)\b", re.IGNORECASE)
+    for p in pages:
+        page_num = p["page"]
+        for line in p["text"].split("\n"):
+            m = fig_re.match(line.strip())
+            if m:
+                mapping.setdefault(page_num, []).append(f"Fig. {m.group(1)}")
+    return mapping
+
+
 def build_figure_summary(extractions_dir: Path) -> str:
     """Read all vision extraction JSONs and return a text summary for LLM context.
 
     Only includes figures with extractable data (box plots, line charts,
     table images). Skips empty or non-data figures to conserve tokens.
+    Adds a page-to-figure mapping preamble so the LLM can resolve crop IDs.
     """
     if not extractions_dir.is_dir():
         return ""
@@ -297,24 +320,37 @@ def build_figure_summary(extractions_dir: Path) -> str:
     if not paths:
         return ""
 
+    text_dir = extractions_dir.parent / "text"
+    page_fig_map = _build_page_figure_map(text_dir)
+
     parts: list[str] = []
+
+    if page_fig_map:
+        map_lines = ["PAGE-TO-FIGURE MAPPING (from figure captions in text):"]
+        for pg in sorted(page_fig_map):
+            map_lines.append(f"  PDF page {pg} → {', '.join(page_fig_map[pg])}")
+        map_lines.append(
+            "Use this mapping to convert crop IDs (e.g. p008_fig01 = page 8) to "
+            "paper figure numbers (e.g. Fig. 3). Sub-panels A/B may appear on the "
+            "same page or span pages; use axis labels and text context to determine "
+            "which sub-panel a crop belongs to."
+        )
+        parts.append("\n".join(map_lines))
+
     for p in paths:
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
         pt = data.get("plot_type", "unknown")
-        # Skip non-data figures to keep context focused
         if pt in ("workflow_diagram", "experimental_workflow", "unknown"):
             continue
         if pt == "plasmid_map" and not data.get("features"):
             continue
-        # Skip box plots with no groups or all-null medians
         if pt == "box_plot":
             groups = data.get("groups", [])
             if not groups or all(g.get("median") is None for g in groups):
                 continue
-        # Skip line charts with no series data
         if pt in ("line_chart", "line_plot") and not data.get("series"):
             continue
         parts.append(_summarize_one_extraction(p.stem, data))

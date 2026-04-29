@@ -4,7 +4,8 @@ COMBINED_SYSTEM = """\
 You extract structured experimental data from scientific papers, producing a \
 denormalized table where every measurement row carries its full experimental \
 run metadata. Reply with a single JSON object only — no markdown fences, \
-no commentary. Use null for unknown values."""
+no commentary. Use null for unknown values. Aim for MAXIMUM COMPLETENESS: \
+every quantitative result in the paper should become its own row."""
 
 COMBINED_USER = """\
 You are given three types of input from a scientific paper:
@@ -14,81 +15,100 @@ You are given three types of input from a scientific paper:
 figure panels by a vision model (box-plot medians/IQR, line-chart points, \
 table-image cells). These appear under "--- FIGURE EXTRACTIONS ---".
 
-Your task has TWO phases executed together in ONE output:
+Your task: produce a DENORMALIZED table where every measurement row carries \
+full run metadata. Assign Run_ID (RUN_001, RUN_002, …) per unique \
+experiment × strain × plasmid × condition. Assign Measurement_ID (MEAS_001, \
+MEAS_002, …) globally and sequentially. When a single run produces multiple \
+outcomes (e.g. AUC and lag phase), emit separate rows sharing the same Run_ID.
 
-Phase 1 — Identify every distinct experimental **run** (a unique combination \
-of experiment type + strain/organism + treatment/plasmid/condition). Assign \
-each a stable Run_ID (RUN_001, RUN_002, …). Controls, negative controls, \
-and evolved/mutant variants each get their own Run_ID.
+=== FIELD RULES ===
+- paper_id: first-author surname + year (e.g. "Dorado-Morales_2021"), same \
+for every row.
+- experiment_type: snake_case (growth_curve_assay, evolution_experiment, \
+plasmid_curing_assay, etc.).
+- run_description: full sentence including strain, plasmid, conditions.
+- field_name: snake_case quantity (plasmid_curing_efficiency, \
+area_under_growth_curve, lag_phase_duration, plasmid_stability, \
+plasmid_copy_number, plasmid_deletion_detected).
+- raw_value: exact number, "~number" for figure estimates, or \
+"IN_FIGURE (Fig. X)" only when no numeric data is available.
+- measurement_time_h: timepoint in hours (day 7 = 168, day 14 = 336, \
+day 21 = 504, day 28 = 672, day 35 = 840). Use 0 for baseline. null if \
+not time-resolved.
+- source_in_paper: "Table 2", "Fig. 3A", "Main text p.10", or semicolons \
+for multiple: "Fig. 4; main text". IMPORTANT: when the body text explicitly \
+states a numeric value AND also cites a figure (e.g. "pMW2 was stably \
+maintained at 100% throughout the experiment (Fig. 4)"), use "Fig. 4; main \
+text" as the source — not just "Fig. 4". This distinguishes text-stated \
+baseline/endpoint values from figure-only intermediate estimates.
+- medium: include supplements with concentrations.
+- For box-plot vision data: use median as ~value, IQR as dispersion.
 
-Phase 2 — For every quantitative **measurement** reported for each run, emit \
-one row that carries the full run metadata *plus* the measurement data. Assign \
-each row a globally sequential Measurement_ID (MEAS_001, MEAS_002, …). When a \
-single run produces multiple measured outcomes (e.g. AUC *and* lag phase from \
-the same growth-curve experiment), emit separate rows sharing the same Run_ID.
+=== FIGURE EXTRACTION RULES ===
+Use the PAGE-TO-FIGURE MAPPING to convert crop IDs (e.g. p008_fig01 = \
+page 8) to paper figure numbers (e.g. Fig. 3). Sub-panels (A, B) may share \
+a page or span pages — use axis labels and figure captions from the body \
+text to determine which sub-panel each crop belongs to.
 
-Rules:
-1. paper_id: derive from first/corresponding author surname + year \
-(e.g. "Dorado-Morales_2021"). Use the SAME value for every row.
-2. experiment_type: use a concise snake_case category — growth_curve_assay, \
-evolution_experiment, plasmid_curing_assay, conjugation_assay, MIC_assay, \
-plasmid_copy_number_assay, or another descriptive term.
-3. run_description: a full sentence summarising the experimental setup, \
-including strain, plasmid, key conditions, duration, and confirmation method \
-where applicable.
-4. field_name: a concise snake_case label for the quantity measured, e.g. \
-plasmid_curing_efficiency, area_under_growth_curve, lag_phase_duration, \
-plasmid_stability, plasmid_copy_number, plasmid_deletion_detected.
-5. raw_value / raw_units: value as reported. For exact numbers use a number. \
-For estimates read from figures, prefix with ~ (e.g. ~150). When figure \
-extraction data is provided (box-plot medians, line-chart points), use those \
-values directly with a ~ prefix since they are read from plots. Only use \
-"IN_FIGURE (Fig. X)" if no extraction data exists for that figure.
-6. normalized_value / normalized_units: provide when the paper gives or implies \
-a normalised form (proportion 0-1, ratio vs control, etc.). Use null if not \
-applicable.
-7. dispersion_value / dispersion_type: report variability (SD, SEM, IQR, CI) \
-when available. For values estimated from box-plots or error bars, note that \
-in dispersion_type, e.g. "IQR (estimated from boxplot)".
-8. measurement_time_h: timepoint in hours. Use 0 for baseline / day-0, \
-convert days to hours (1 day = 24 h). Use null if not time-resolved.
-9. source_in_paper: cite the specific table/figure/text location. Use the \
-format "Table 2", "Fig. 3A", "Main text p.10". Semicolons for multiple \
-sources, e.g. "Fig. 4; main text".
-10. medium: include supplements with concentrations where stated, e.g. \
-"TSB + chloramphenicol (20 µg/mL) + anhydrotetracycline (100 ng/mL)".
-11. mobilization_type: the plasmid's transfer capability — "conjugative", \
-"mobilizable", or "non-mobilizable".
-12. plasmid_size: in kilobases (number). Use null if not stated.
-13. COMPLETENESS IS CRITICAL. You must extract measurements from ALL of \
-these sources:
-  (a) Every row of every data table (e.g. Table 2 — each strain × plasmid \
-combination is a separate measurement row).
-  (b) Every figure panel that contains data — box plots, line charts, bar \
-charts. Use the FIGURE EXTRACTIONS section for numeric values. Each distinct \
-plasmid/strain/condition shown in a figure panel becomes its own row.
-  (c) Quantitative results stated in the body text (e.g. "plasmid stability \
-was 100% at day 0", "stability decreased to 4.6%").
-  (d) Evolution / time-series experiments: emit one row per timepoint per \
-condition (e.g. day 0, day 7, day 14, day 21, day 28, day 35 of an \
-evolution experiment each become separate rows).
-  (e) Supplementary data mentioned in the text (e.g. copy number from Fig. S4).
-  A typical paper in this domain yields 50–100 measurement rows. If you have \
-fewer than 30, you are likely missing data — re-read the inputs.
-14. Look for experimental details in Methods, Results, figure legends, table \
-footnotes, and supplementary references.
-15. Figure extraction data: when the FIGURE EXTRACTIONS section is present, \
-cross-reference group labels (e.g. "pMW2t0 C1", "PFt35 pUR2940t35") with \
-strain/plasmid information from Methods text to assign correct run metadata. \
-Each box-plot group or line-chart data point that represents a distinct \
-measurement should become its own row. The figure crop IDs (e.g. "p008_fig01") \
-indicate the PDF page — use the paper's figure numbering (e.g. "Fig. 3A") in \
-source_in_paper by matching page numbers and axis labels to figure captions.
-16. For box-plot data from figure extractions, use the median as raw_value \
-with ~ prefix, the y-axis label to determine raw_units, and report the IQR \
-as dispersion_value/dispersion_type. When a figure has per-clone box plots \
-(C1, C2, C3), average them into a single representative measurement per \
-plasmid condition unless the paper explicitly discusses per-clone differences.
+For per-clone box plots (C1, C2, C3): average into one representative \
+measurement per plasmid condition UNLESS the paper explicitly discusses \
+per-clone differences.
+
+=== COMPLETENESS CHECKLIST — you MUST extract from ALL of these ===
+
+1. TABLES: Every row of every data table. If Table 2 has 15 strain × \
+plasmid rows, emit 15 measurement rows.
+
+2. BOX-PLOT FIGURES: Every box-plot group in FIGURE EXTRACTIONS → one row \
+per plasmid/condition with AUC and lag as separate rows. Include ALL figure \
+panels across ALL pages (p008 through p013 and beyond).
+
+3. EVOLUTION TIME-SERIES: When a figure tracks a measurement over time \
+(e.g. % plasmid-bearing cells over 35 days), emit ONE ROW PER TIMEPOINT \
+PER CONDITION. For N plasmids measured at T timepoints, this means N × T \
+rows. Even without vision data points, infer values from text (e.g. "stably \
+maintained" = ~100 at each timepoint; a declining curve → estimate \
+intermediate values). Do NOT collapse into a single summary row.
+For source attribution: baseline (day 0) and endpoint values that are \
+explicitly stated in the text should use "Fig. X; main text" as source \
+with exact numbers. Intermediate timepoints estimated from the figure only \
+should use "Fig. X" with ~approximate values.
+
+4. BODY TEXT MEASUREMENTS: Scan ALL Results paragraphs for quantitative \
+claims. Capture: stability percentages, plasmid loss events, per-clone \
+retransformation results, deletion/rearrangement events (field_name = \
+"plasmid_deletion_detected", raw_value = "yes").
+
+5. RETRANSFORMATION EXPERIMENTS: Evolved cured clones re-transformed with \
+ancestral or evolved plasmids — each clone × plasmid variant gets its own \
+rows. Track C1/C2/C3 and plasmid generation (t0/t35) in strain_id and \
+plasmid_name.
+
+6. RETRANSFORMATION STABILITY: Prose descriptions of stability after \
+re-introduction → separate rows per clone per variant. For EACH clone \
+(C1, C2, C3), emit TWO rows: one for the adapted/evolved plasmid variant \
+(typically stable at 100%) and one for the non-adapted variant (e.g. lost \
+to 4%). This yields 2 rows × 3 clones = 6 rows for a typical 3-clone \
+experiment. Use "Main text p.X" as source.
+
+7. SUPPLEMENTARY DATA: When text references supplementary figures (e.g. \
+"copy number did not change — Fig. S4"), emit one row per plasmid/strain \
+studied with raw_value = "IN_FIGURE (Fig. S4)" and field_name matching the \
+measurement type (e.g. plasmid_copy_number). Use source = "Fig. S4 \
+(supplementary); main text p.X" where X is the page referencing it.
+
+8. PLASMID STRUCTURAL CHANGES: When text describes a deletion, \
+rearrangement, or structural variant (e.g. "12.8-kb deletion mediated by \
+IS elements"), emit a row with field_name = "plasmid_deletion_detected", \
+raw_value = "yes". Use source = "Main text p.X; Fig. Y" citing both the \
+text and any figure showing the structural comparison.
+
+=== FINAL CHECK ===
+A typical paper with tables, evolution assays, growth curves, \
+retransformation, and supplementary data yields 65–100 measurement rows. \
+If you have fewer than 50 rows, re-read the inputs systematically: \
+Tables → Figure captions → Results text → Supplementary references → \
+Figure extraction data.
 
 Return exactly this JSON shape:
 {{
