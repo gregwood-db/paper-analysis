@@ -1,190 +1,340 @@
-# paper-analysis — figure + text extraction POC
+# paper-analysis
 
-Proof-of-concept: (1) crop figures, run a vision LLM for plots / table-as-image, compare to a ground-truth spreadsheet where configured; (2) extract native PDF text and text tables, then an optional text LLM pass to surface measurement-style candidates for the same spreadsheet world (Runs / Measurements).
+Automated extraction of structured experimental data from scientific papers about plasmid biology, horizontal gene transfer, and bacterial genetics. Processes PDFs end-to-end: text extraction, figure discovery, vision-model analysis, LLM-based measurement extraction, and post-processing — producing denormalized tables of experimental measurements with full run metadata.
 
-## Setup
+## Quick Start
+
+### Processing New Papers (No Ground Truth)
+
+The primary use case: extract structured data from papers you haven't manually annotated.
 
 ```bash
+# 1. Setup
 cd paper-analysis
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env
-# Edit .env and set ANTHROPIC_API_KEY and/or OPENAI_API_KEY
+cp .env.example .env   # set ANTHROPIC_API_KEY and/or OPENAI_API_KEY
+
+# 2. Drop PDFs into data/papers/
+
+# 3. Create a minimal batch config (or add to existing batch.yaml)
+#    Papers not listed in paper_map auto-derive an ID from the filename.
+
+# 4. Run the full pipeline
+paper-analysis batch-run -c config/batch.yaml
+
+# 5. Post-process (no API calls — expands vision data, filters false positives)
+paper-analysis batch-postprocess -c config/batch.yaml
+
+# 6. Collect results
+#    Each paper's output is at:
+#      artifacts/<Paper_ID>/text/candidate_combined.json
 ```
 
-## Data layout
+That's it. Each paper gets its own artifact directory under `artifacts/<Paper_ID>/` with text, figures, vision extractions, and the final `candidate_combined.json` — a flat table of measurement rows with full experimental metadata.
 
-Place inputs locally (not committed):
+**No ground truth is needed.** The `batch-evaluate` step is entirely optional and only relevant when you have a manually curated spreadsheet to compare against.
 
-- `data/paper.pdf` — source paper
-- `data/ground_truth.xlsx` — spreadsheet with Runs / Measurements sheets (optional- for model evaluation)
-- `artifacts/text/` — created by `extract-text` / `analyze-text` (under `.gitignore` with other `artifacts/`)
+You can also process a single new paper without touching the batch config:
+
+```bash
+# Process one PDF at a time via --paper (uses filename stem as Paper_ID)
+paper-analysis batch-run -c config/batch.yaml -p NewPaper_2025
+paper-analysis batch-postprocess -c config/batch.yaml -p NewPaper_2025
+```
+
+### Adding New Papers to an Existing Batch
+
+To add papers to a batch that already has a `paper_map`:
+
+1. Drop the PDF into `data/papers/`.
+2. Optionally add a `paper_map` entry in `batch.yaml` to assign a custom `Paper_ID`. If omitted, the filename stem is used (e.g., `Smith_2024.pdf` becomes `Smith_2024`).
+3. Run `batch-run` with `-p` to process just the new paper without re-running everything.
+
+### Evaluating Against Ground Truth (Optional)
+
+If you have a ground truth spreadsheet for benchmarking:
+
+```bash
+# Configure ground_truth_path and ground_truth_sheet in batch.yaml, then:
+paper-analysis batch-evaluate -c config/batch.yaml
+paper-analysis batch-evaluate -c config/batch.yaml --no-gaps  # skip gap analysis
+```
+
+## What the Pipeline Does
+
+For each paper, `batch-run` executes five stages:
+
+| Stage | What happens | API calls? |
+|-------|-------------|------------|
+| 1. Extract text | Dump PDF text + native tables via PyMuPDF | No |
+| 2. Discover figures | Find figure bounding boxes in the PDF | No |
+| 3. Vision extraction | Classify each figure (box plot, line chart, heatmap, etc.) and extract structured data | Yes (vision LLM) |
+| 4. Combined extraction | LLM reads text + tables + figure data, produces denormalized measurement rows | Yes (text LLM) |
+| 5. Post-processing | Expand vision data points into individual rows, derive qualitative fields, filter by master field list | No |
+
+The final output is `artifacts/<Paper_ID>/text/candidate_combined.json` — a flat table where every measurement row carries full experimental context (strain, plasmid, conditions, etc.).
+
+### Post-Processing Details
+
+`batch-postprocess` runs three zero-API-cost steps on existing artifacts:
+
+1. **Vision data expansion**: Each line-chart point, box-plot median, heatmap cell, and table-image value becomes its own measurement row (the LLM often summarizes figures rather than emitting individual data points).
+
+2. **Qualitative field derivation**: For papers with pairwise conjugation matrices (e.g., Gama 2017), derives `conjugation_detection_status` and `conjugation_interaction_direction` from extracted `conjugation_rate` values.
+
+3. **Master Field List filter**: Uses `MASTER_FIELD_LIST_Combined_15papers.xlsx` to remove rows with field names not recognized by either the curated field list or the synonym mapping system. Eliminates false positives from experimental-setup parameters the LLM over-extracts.
+
+## Data Layout
+
+```
+paper-analysis/
+├── config/
+│   └── batch.yaml              # Batch processing config
+├── data/
+│   ├── papers/                  # Source PDFs (not committed)
+│   ├── RUNS_MEASUREMENTS_15files.xlsx      # Ground truth
+│   └── MASTER_FIELD_LIST_Combined_15papers.xlsx  # Field definitions
+├── artifacts/                   # All outputs (gitignored)
+│   └── <Paper_ID>/
+│       ├── text/
+│       │   ├── pages.json                  # Raw page text
+│       │   ├── tables.json                 # Native tables
+│       │   └── candidate_combined.json     # Final extraction output
+│       ├── figures/                        # Cropped figure PNGs
+│       └── extractions/                    # Per-figure vision JSONs
+├── src/paper_analysis/
+│   ├── batch.py                 # Batch orchestration
+│   ├── batch_evaluate.py        # Evaluation + synonym mapping
+│   ├── postprocess.py           # Post-processing + MFL filter
+│   ├── combined_prompts.py      # LLM extraction prompts
+│   ├── combined_analyze_llm.py  # LLM API calls
+│   ├── cli.py                   # All CLI commands
+│   └── vision/                  # Vision model clients
+└── PROMPT_ITERATION_LOG.md      # Iteration history + metrics
+```
 
 ## Configuration
 
-Edit `config/poc.yaml`:
+### `config/batch.yaml`
 
-- `pdf.path` — path to the PDF (default `data/paper.pdf`)
-- `figures` — each target: `id`, `page` (1-based), `plot_type` (`box_plot` | `line_chart` | `line_plot` | `table_image` | `plasmid_map` | `workflow_diagram` | `experimental_workflow`), and either `bbox_pdf` (x0,y0,x1,y1 in PDF points) or `bbox_norm` (0–1 fractions of page width/height). `line_plot` is an alias of `line_chart` (same JSON schema and prompts). Use `plasmid_map` for vector maps, `workflow_diagram` for generic flowcharts, and `experimental_workflow` for lab / study-protocol pipeline figures (not numeric charts). Optional `skip: true` on an entry skips both cropping and vision for that id (decorative bitmaps, logos, non-data panels).
-- `exclude_figure_ids` (optional) — list of `id` strings to omit from `extract-figures` and `run-vision` without removing them from a saved discover file. Applies together with `skip` and with `exclude_figure_ids` in a `--figures-config` YAML (see below).
-- `auto_discover` (optional) — derive `bbox_pdf` from embedded images on each page (merge overlaps, drop tiny regions). Use for batch runs instead of hand-drawing every box.
-- `evaluation` — sheet name, column names, filters, and numeric tolerance
-- `text` (optional) — output directory (`output_dir`), `pages` filter, `max_context_chars` for the LLM, optional `llm_model` override (defaults follow `vision`)
-- `export` (optional) — `output_path` for the Excel workbook from `export-results`, and `include_native_pdf_tables` (whether to flatten `artifacts/text/tables.json` into rows)
+```yaml
+papers_dir: data/papers              # required: directory containing PDFs
+artifacts_dir: artifacts             # required: where outputs go
 
-## Image Analysis Pipeline
+# Optional — only needed for batch-evaluate:
+ground_truth_path: data/RUNS_MEASUREMENTS_15files.xlsx
+ground_truth_sheet: RUNS_MEASUREMENTS_Master
 
-### Automatic bounding boxes for PDF images
+# Optional — improves false-positive filtering in post-processing:
+field_list_path: data/MASTER_FIELD_LIST_Combined_15papers.xlsx
 
-Discovery collects rasters from `get_image_rects`, `get_text("dict"/"rawdict")` image blocks (`TEXT_PRESERVE_IMAGES`), and `get_text("blocks")` image rows. It also collects vector charts (default `include_vector_graphics: true`): type-3 textpage blocks (`TEXT_COLLECT_VECTORS`) plus `page.get_drawings()` path bboxes, then clusters nearby primitives using `drawing_cluster_gap_frac` so one box/line plot becomes one region. Journal PDFs often store data plots as vectors and decorative art as embedded PNGs—raster-only discovery explains “illustrations yes, plots no.”
+# Optional — map filenames to custom Paper_IDs. Unmapped PDFs use filename stem.
+paper_map:
+  - filename: Chen_2017.pdf
+    paper_id: "006_Chen_2017"
+  # ... one entry per paper
 
-Merging is two-phase: (1) `duplicate_merge_iou` (~0.82) collapses the same region from multiple sources; (2) optional `merge_fragments: true` + `merge_iou_threshold` merges multi-tile rasters. With `merge_fragments: false` (default), separate raster panels stay separate. Regions smaller than `min_area_frac` / `min_width_frac` / `min_height_frac` are dropped after merging.
+vision:
+  provider: anthropic      # or openai
+  model: null              # uses provider default
 
-- `auto_discover.enabled: true` with `strategy: only_auto` — `extract-figures` / `run-vision` use only discovered targets (the manual `figures:` list is ignored).
-- `strategy: append_to_manual` — run manual `figures` first, then append discovered regions (useful for a few hand-picked panels plus auto coverage).
-
-Tune thresholds per venue if needed. Limits: vector-only figures (pure PDF drawing with no embedded bitmap) may not appear as images; those papers still need another strategy (e.g. layout model or full-page vision) in a later iteration.
-
-Emit a YAML block to review or paste into config:
-
-```bash
-# Writes config/discovered_figures.yaml by default (same directory as --config)
-paper-analysis discover-bboxes --config config/poc.yaml
-# Override path, or print to stdout for piping:
-paper-analysis discover-bboxes --config config/poc.yaml -o path/to/figures.yaml
-paper-analysis discover-bboxes --config config/poc.yaml --stdout
+auto_discover:
+  enabled: true
+  strategy: only_auto
+  default_plot_type: auto  # auto-classify each figure
 ```
 
-Important: `poc.yaml` does not automatically read `discovered_figures.yaml`. With `auto_discover.enabled: true` in `poc.yaml`, `extract-figures` / `run-vision` re-run discovery in memory (results can differ from an earlier `discover-bboxes` run). To use a saved discover file as the source of truth, pass `--figures-config` to both commands (see CLI below). Alternatively, copy the `figures:` block into `poc.yaml` and set `auto_discover.enabled: false`.
+**Minimal config for new papers** (no ground truth, no MFL):
 
-Skipping junk / non-data crops: Discovery often picks decorative images as well as plots. To avoid wasting API calls, use any of: (1) `skip: true` on a figure entry in YAML; (2) top-level `exclude_figure_ids:` in `poc.yaml` (applies even when using `--figures-config`); (3) `exclude_figure_ids:` next to `figures:` in the discover YAML so you can re-run `discover-bboxes` and refresh the file without deleting figure rows. Excluded ids are not cropped and not sent to the vision model; remove stale `artifacts/figures/<id>.png` and `artifacts/extractions/<id>.json` yourself if they were created earlier.
-
-If the file only contains `figures:` and no list items, run with `--verbose` to see per-page counts (`xref_rects`, `image_blocks`, `after_merge`, `after_size_filter`). Earlier versions skipped image blocks because PyMuPDF requires the `TEXT_PRESERVE_IMAGES` flag on `get_text("dict")`; that is now set internally. If `xref_rects` and `image_blocks` are both 0, the page likely has vector-only artwork (no bitmaps in the text layer). If counts are high until `after_size_filter`, try `--relaxed` or lower `min_*_frac` in YAML. If `raw` is 1 on a page that visually has many panels, the publisher likely stored one composite image for the whole figure—auto-crop cannot split panels without a separate panel-detection step. If `raw` is large but `after_dedupe` is 1, try `merge_fragments: false` (default now); if tiles of one figure stay split, set `merge_fragments: true`.
-
-### Finding bounding boxes manually
-
-Render a page to PNG and pick coordinates:
-
-```bash
-python tools/preview_page.py data/paper.pdf --page 5 --out artifacts/page_preview.png
+```yaml
+papers_dir: data/papers
+artifacts_dir: artifacts
+auto_discover:
+  enabled: true
+  strategy: only_auto
+  default_plot_type: auto
 ```
 
-Open the image in any viewer; note pixel coords. PDF user space matches PyMuPDF pixmap coords when using the same zoom.
+### Environment Variables
 
-### Table as image (`table_image`)
+Set in `.env`:
 
-Some papers render a table as a graphic (screenshot-style or flattened artwork). Native PDF table extraction will not see cell text; use the same crop → vision flow as figures, with `plot_type: table_image`. Discovery does not auto-detect “this region is a table”; after `discover-bboxes`, edit the YAML entry (or add a manual `figures` row) to set `plot_type: table_image` for that crop. `run-vision` then writes JSON with `column_headers`, `rows`, optional `title_or_caption` and `notes` (see `[schemas.py](src/paper_analysis/schemas.py)` `TableImageExtraction`). `evaluate` does not compare `table_image` to numeric spreadsheet rows in this POC—use the JSON or a later mapper. True text tables (selectable text in the PDF) still belong in a text/table pipeline (e.g. `find_tables`, pdfplumber), not this vision path.
+- `ANTHROPIC_API_KEY` — required for Anthropic provider
+- `OPENAI_API_KEY` — required for OpenAI provider
+- `PAPER_ANALYSIS_VISION_PROVIDER` — `anthropic` (default) or `openai`
+- `ANTHROPIC_MODEL` / `OPENAI_MODEL` — optional model overrides
 
-## Text Analysis Pipeline
+## CLI Reference
 
-Targets experimental findings expressed as selectable PDF text and native text tables (PyMuPDF `find_tables()`), which often carry numbers that also appear in a Measurements sheet (e.g. “Table 2”, inline results). This is separate from figure vision (plots, `table_image`).
-
-
-| Step        | Command                                                    | Output                                                                                                                                                                                                                                                              |
-| ----------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Dump     | `paper-analysis extract-text --config config/poc.yaml`     | `artifacts/text/pages.json` (per-page plain text), `artifacts/text/tables.json` (detected tables with rows). No API key.                                                                                                                                            |
-| 2. Analyze  | `paper-analysis analyze-text --config config/poc.yaml`     | `artifacts/text/candidate_measurements.json` — LLM-structured list (`TextMeasurementCandidate`: `field_name`, `raw_value`, `source_in_paper`, `source_type` = `table`                                                                                               |
-| 3. Runs     | `paper-analysis extract-runs --config config/poc.yaml`     | `artifacts/text/candidate_runs.json` — LLM-structured list of experimental run metadata (`RunMetadataCandidate`: protocol details, strain/plasmid info, measured outcomes). Run before `export-results` if you want the Extracted_Runs sheet in the Excel workbook. |
-| 4. Combined | `paper-analysis extract-combined --config config/poc.yaml` | `artifacts/text/candidate_combined.json` — denormalized run+measurement rows in a single LLM pass. Each row carries full run metadata inline, making experiment-to-data linking automatic. Requires `extract-text` first; for best coverage, also run `extract-figures` + `run-vision` first. |
-
-
-Steps 2–4 are independent LLM passes over the same `pages.json` + `tables.json` input. Steps 2+3 (separate runs and measurements) produce two unlinked artifacts. **Step 4 (combined) is the recommended approach** — it extracts runs and measurements together so every measurement row is automatically linked to its experimental condition via `Run_ID`, with full metadata (species, strain, plasmid, medium, etc.) denormalized on each row. This matches the format of a typical combined Runs+Measurements ground-truth spreadsheet.
-
-**Recommended full pipeline** (in order):
+### Batch Commands (recommended)
 
 ```bash
-paper-analysis extract-text -c config/poc.yaml        # 1. dump text + tables (no API)
-paper-analysis extract-figures -c config/poc.yaml      # 2. crop figure panels (no API)
-paper-analysis run-vision -c config/poc.yaml           # 3. vision LLM on each crop (API)
-paper-analysis extract-combined -c config/poc.yaml     # 4. combined extraction (API)
-paper-analysis export-results -c config/poc.yaml       # 5. export to Excel (no API)
+# Full pipeline: text + figures + vision + LLM + postprocess for all papers
+paper-analysis batch-run -c config/batch.yaml
+
+# Process specific papers only
+paper-analysis batch-run -c config/batch.yaml -p Smith_2024 -p Jones_2023
+
+# Skip vision (text-only extraction, no figure processing)
+paper-analysis batch-run -c config/batch.yaml --skip-vision
+
+# Post-process only (no API calls, runs on existing artifacts)
+paper-analysis batch-postprocess -c config/batch.yaml
+
+# Post-process specific papers
+paper-analysis batch-postprocess -c config/batch.yaml -p 003_Gama_2017
+
+# Evaluate against ground truth (optional, requires ground_truth_path in config)
+paper-analysis batch-evaluate -c config/batch.yaml
+paper-analysis batch-evaluate -c config/batch.yaml --no-gaps  # skip gap analysis
 ```
 
-**Run metadata extraction** (step 3) identifies each distinct experimental condition in the paper — every unique combination of experiment type, strain, plasmid, and treatment — and extracts structured metadata: protocol parameters (temperature, media, duration, replicates), biological details (species, strain, sequence type, plasmid characteristics, resistance genes), and what was measured. The LLM assigns sequential `Run_ID` values (`RUN_001`, `RUN_002`, …) and derives a `Paper_ID` from the first author and year. This mirrors the Runs sheet in a typical ground-truth spreadsheet. Requires `extract-text` first (same `pages.json` + `tables.json` input as `analyze-text`).
+### Single-Paper Commands
 
-**Combined extraction** (step 4) performs both tasks in one LLM call, producing a flat table where each measurement row carries its run metadata inline (`CombinedMeasurementCandidate` in `combined_schemas.py`). The LLM receives three types of context: native PDF tables, body text, and (when available) structured figure extraction data from the vision pipeline. This allows the combined pass to include numeric values from figures — box-plot medians, line-chart points — alongside tabular and prose data, cross-referenced with Methods text for correct run metadata assignment. Multiple measurements from the same experimental condition share a `Run_ID`. Values estimated from figures use a `~` prefix; values only visible in a plot with no vision extraction use `IN_FIGURE (Fig. X)`.
-
-Limits: `find_tables` misses some publisher layouts; complex tables may need pdfplumber/Camelot later. Body text beyond `text.max_context_chars` is head+tail truncated for the LLM. `evaluate` does not yet score text candidates, run metadata, or combined candidates against the spreadsheet—merge or validate in a follow-up step.
-
-## CLI
-
-`extract-figures` and `run-vision` — two ways to supply figure targets
-
-
-| Command pattern                              | Where the figure list comes from                                                                                                                                                    |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--config config/poc.yaml` only              | `poc.yaml` only: the `figures:` block and/or `auto_discover` (discovery runs again in memory when `auto_discover.enabled` is true). `discovered_figures.yaml` is never read.        |
-| `--config …` and `--figures-config` / `-f` … | The standalone YAML’s top-level `figures:` (e.g. `config/discovered_figures.yaml` from `discover-bboxes`). `poc.yaml` still supplies PDF path, artifacts dirs, and vision settings. |
-
-
-Use `--config` alone when everything you need is in `poc.yaml` (manual crops, or `auto_discover` defined there). Use `--figures-config` when your authoritative crops live in a separate file—typical after `discover-bboxes` (writes `config/discovered_figures.yaml` by default)—so extraction matches that saved list instead of re-deriving it from `poc.yaml`.
+For working with individual papers via `config/poc.yaml`:
 
 ```bash
-# List embedded images on a page (optional helper)
+paper-analysis extract-text -c config/poc.yaml       # dump text + tables
+paper-analysis extract-figures -c config/poc.yaml     # crop figure panels
+paper-analysis run-vision -c config/poc.yaml          # vision LLM on crops
+paper-analysis extract-combined -c config/poc.yaml    # combined LLM extraction
+paper-analysis export-results -c config/poc.yaml      # export to Excel
+```
+
+### Discovery and Debugging
+
+```bash
+# List embedded images on a page
 paper-analysis list-images data/paper.pdf --page 5
 
-# Suggested figures: YAML from embedded image bboxes (no API)
-# Either keep discovered bboxes in discovered_figures.yaml, or move them to poc.yaml
-paper-analysis discover-bboxes --config config/poc.yaml   # writes to config/discovered_figures.yaml
-paper-analysis discover-bboxes --config config/poc.yaml --out /path/to/output # custom output loc
-paper-analysis discover-bboxes --config config/poc.yaml -v --relaxed  # debug empty output
-paper-analysis discover-bboxes --config config/poc.yaml --stdout      # print only, no file
+# Discover figure bounding boxes
+paper-analysis discover-bboxes -c config/poc.yaml
+paper-analysis discover-bboxes -c config/poc.yaml -v --relaxed  # debug empty output
 
-# Targets from poc.yaml only (manual figures and/or auto_discover migrated to poc.yaml)
-paper-analysis extract-figures --config config/poc.yaml
-paper-analysis run-vision --config config/poc.yaml
+# Inspect ground truth spreadsheet
+paper-analysis inspect-sheet -c config/poc.yaml
 
-# Targets from a saved discover file (must match extract + vision)
-paper-analysis extract-figures --config config/poc.yaml --figures-config config/discovered_figures.yaml
-paper-analysis run-vision --config config/poc.yaml --figures-config config/discovered_figures.yaml
-
-# Inspect spreadsheet columns / rows matching a source filter (no API calls)
-paper-analysis inspect-sheet --config config/poc.yaml
-
-# Compare extractions to ground truth
-paper-analysis evaluate --config config/poc.yaml
-
-# Text + native tables (no vision images). Run before export-results if you want text rows in the workbook.
-paper-analysis extract-text --config config/poc.yaml
-paper-analysis analyze-text --config config/poc.yaml
-
-# Run metadata: extract structured experiment conditions (requires extract-text first).
-paper-analysis extract-runs --config config/poc.yaml
-
-# Combined run+measurement extraction (recommended): single LLM pass producing denormalized rows.
-# Each measurement row carries full run metadata. Requires extract-text first;
-# for best coverage, also run extract-figures + run-vision first so figure data is included.
-paper-analysis extract-combined --config config/poc.yaml
-
-# Export Measurements + Runs + Combined sheets: merges vision JSON + text candidates (if present) + native table cells (if configured) + run metadata (if present) + combined (if present)
-paper-analysis export-results --config config/poc.yaml
-# Same as extract-figures / run-vision: limit vision rows to a saved `figures:` file
-paper-analysis export-results --config config/poc.yaml --figures-config config/discovered_figures.yaml
+# Evaluate single paper against ground truth
+paper-analysis evaluate -c config/poc.yaml
 ```
 
-Environment:
+## How Evaluation Works (Optional)
 
-- `PAPER_ANALYSIS_VISION_PROVIDER` — `anthropic` (default) or `openai`
-- Model overrides: `ANTHROPIC_MODEL`, `OPENAI_MODEL`, or `vision.model` in YAML
+`batch-evaluate` is only needed when benchmarking against a ground truth spreadsheet. It compares extracted rows against ground truth using:
+
+- **Field name matching**: A synonym system (`_SYNONYM_GROUPS` in `batch_evaluate.py`) canonicalizes 330+ field name variants into groups. For example, `conjugation_rate`, `conjugation_rate_estimate`, `conjugation_transfer_frequency`, and `transfer_frequency` all map to the same canonical form.
+- **Key construction**: Rows are matched on `(paper_id, field_name_canonical, raw_value_rounded)` with a loose fallback on `(paper_id, field_name_canonical)`.
+- **Metrics**: Precision, Recall, F1-score, and MAE (for numeric values).
+- **Gap analysis**: Reports missing field types per paper to guide synonym expansion.
+
+## Master Field List (Optional)
+
+`MASTER_FIELD_LIST_Combined_15papers.xlsx` is an optional curated vocabulary that improves precision by filtering false positives during post-processing. Without it, the pipeline still works — you just get more extracted rows (some of which may be experimental setup parameters rather than true measurements). It provides:
+
+| Column | Use |
+|--------|-----|
+| `Field_Name` | Primary normalised field name |
+| `Synonyms` | Semicolon-separated aliases |
+| `Field_Category` | Classification (e.g., `conjugation_measurement`, `fitness_measurement`, `paper_metadata`) |
+| `Canonical_Field` | `Yes` for 35 highest-priority fields |
+| `Papers` | Which papers use this field (e.g., "Gama 2017; Igler 2021") |
+| `Data_Type` | Expected type (`float`, `integer`, `string`, `categorical`) |
+| `Definition` | Human-readable description |
+| `Normalization_Logic` | How to convert raw values to normalised form |
+
+The post-processing step uses this to filter out false positives: extracted rows whose field names don't appear in the MFL (or the synonym system) are removed.
+
+## Performance
+
+Current metrics across 15 papers (Iteration 7):
+
+| Metric | Value |
+|--------|-------|
+| Ground truth rows | 2,586 |
+| Extracted rows | 1,442 |
+| Matched rows | 915 |
+| Precision | 0.635 |
+| Recall | 0.354 |
+| F1 | 0.454 |
+| False positive rate | 36.5% |
+
+See `PROMPT_ITERATION_LOG.md` for full iteration history (Iterations 0-7, F1 improved from 0.113 to 0.454 — a 302% gain).
+
+## Architecture
+
+### Vision Pipeline
+
+Figures are auto-classified into plot types before extraction:
+
+- **box_plot**: Medians, quartiles, whiskers per group
+- **line_chart**: Per-series, per-timepoint (x, y) values
+- **heatmap**: Row/column/value/annotation per cell (for interaction matrices)
+- **table_image**: Column headers + data rows (for scanned tables)
+
+Classification aliases handle model variability (e.g., `scatter_plot` → `line_chart`, `stacked_bar` → `box_plot`, `interaction_matrix` → `heatmap`).
+
+### Combined LLM Extraction
+
+The combined extraction prompt guides the LLM to produce a denormalized table with:
+
+- Sequential `Run_ID` and `Measurement_ID` assignments
+- Full run metadata on every row (species, strain, plasmid, conditions)
+- Canonical `field_name` vocabulary (130+ names across 12 categories)
+- Continuation-based chunking for papers exceeding the 64K output token limit
+
+### Post-Processing Pipeline
+
+Zero-API-cost steps that run on existing artifacts:
+
+1. Vision data expansion (line chart points → individual rows)
+2. Qualitative field derivation (conjugation rates → detection status)
+3. Master Field List whitelist filter (removes false positives)
+
+Each step is idempotent. Original LLM output is preserved in `.bak` files.
 
 ## Outputs
 
-- `artifacts/figures/` — cropped PNGs
-- `artifacts/extractions/` — one JSON file per figure id (`plot_type`: `box_plot`, `line_chart`, `line_plot`, `table_image`, `plasmid_map`, `workflow_diagram`, `experimental_workflow`, or `unknown`). Common model-invented aliases are mapped automatically (`circular_genome_map` / `genome_map` / `vector_map` -> `plasmid_map`; `schematic_diagram` / `schematic` / `flowchart` -> `workflow_diagram`; `bar_chart` / `bar_plot` -> `box_plot`; `protocol_diagram` -> `experimental_workflow`). Truly unrecognized types are coerced to `unknown` with the original string in `declared_plot_type` and the full object in `raw`; Python emits a `UserWarning` so you can add a new alias in `plot_type_dispatch.py` or a first-class schema in `schemas.py`.
-- `artifacts/text/pages.json` — raw page text from `extract-text`
-- `artifacts/text/tables.json` — native tables from `find_tables`
-- `artifacts/text/candidate_measurements.json` — text LLM candidates from `analyze-text` (`[text_schemas.py](src/paper_analysis/text_schemas.py)`)
-- `artifacts/text/candidate_runs.json` — run metadata from `extract-runs` (`[runs_schemas.py](src/paper_analysis/runs_schemas.py)`)
-- `artifacts/text/candidate_combined.json` — combined run+measurement rows from `extract-combined` (`[combined_schemas.py](src/paper_analysis/combined_schemas.py)`)
+### Per-Paper Artifacts
 
-`export-results` writes `export.output_path` (default `artifacts/export/extractions.xlsx`) with up to four sheets:
+- `artifacts/<Paper_ID>/text/candidate_combined.json` — **primary output**: denormalized measurement rows with run metadata
+- `artifacts/<Paper_ID>/text/candidate_combined.json.bak` — pre-post-processing backup of LLM output
+- `artifacts/<Paper_ID>/text/pages.json` — raw page text
+- `artifacts/<Paper_ID>/text/tables.json` — native PDF tables
+- `artifacts/<Paper_ID>/figures/*.png` — cropped figure images
+- `artifacts/<Paper_ID>/extractions/*.json` — per-figure vision extraction results
 
-- Extracted_Measurements — columns aligned with a typical ground-truth Measurements sheet (`Run_ID`, `Field_name`, `Raw_value`, `Raw_units`, `Source_in_paper`, `Notes`) plus provenance: `Extraction_pipeline` (`figure_vision` | `text_llm` | `native_pdf_table`), `Extraction_method` (e.g. `box_plot_median`, `line_chart_point`, `line_plot_point`, `table_image_cell`, `plasmid_map_feature`, `workflow_diagram_node`, `experimental_workflow_node`, `text_llm_candidate`, `native_table_cell`), `Source_artifact` (path to the JSON), `Source_id`, `Plot_type`, `Page` (from `pNNN`_-style figure ids when present), `Axis_or_context`, `Confidence`, `Supporting_evidence`.
-- Extracted_Runs (when `candidate_runs.json` exists) — columns aligned with a typical ground-truth Runs sheet: `Run_ID`, `Run_description`, `Paper_ID`, `experiment_type`, `temperature`, `media`, `culture_format`, `shaking_speed_rpm`, `duration_h`, `replicates_biological`, `selection_antibiotic`, `selection_concentration`, `initial_dilution`, `species`, `strain_id`, `sequence_type`, `isolation_source`, `plasmid_name`, `plasmid_family`, `plasmid_size_kb`, `conjugative`, `resistance_genes`, `plasmid_accession`, `measured_outcomes`, `supporting_evidence`, `confidence`.
-- Combined_Runs_Measurements (when `candidate_combined.json` exists) — denormalized table where each measurement row carries full run metadata: `Measurement_ID`, `Run_ID`, `Paper_ID`, `experiment_type`, `species`, `strain_id`, `plasmid_name`, `plasmid_family`, `plasmid_size`, `mobilization_type`, `medium`, `temperature`, `culture_format`, `replicates_biological`, `selection_antibiotic`, `Run_description`, `Field_name`, `Measurement_time_h`, `Raw_value`, `Raw_units`, `Normalized_value`, `Normalized_units`, `dispersion_value`, `dispersion_type`, `Source_in_paper`, `Confidence`.
-- Export_Meta — export timestamp, PDF path, row counts, flags.
+### Understanding `candidate_combined.json`
 
-Vision rows come from every `artifacts/extractions/*.json` (or only ids in `--figures-config` when passed). Text LLM rows require `analyze-text` to have run first so `artifacts/text/candidate_measurements.json` exists; otherwise export still succeeds with only vision (and native-table) rows. Native table rows need `extract-text` (for `tables.json`) when `export.include_native_pdf_tables` is true. Run metadata rows require `extract-runs` to have run first so `artifacts/text/candidate_runs.json` exists; otherwise export proceeds without the Extracted_Runs sheet. Combined rows require `extract-combined` to have run first so `artifacts/text/candidate_combined.json` exists; otherwise export proceeds without the Combined_Runs_Measurements sheet.
+Each row in the `candidates` array is a single measurement with full context:
 
-The Combined_Runs_Measurements sheet is the recommended output for downstream use — it provides experiment-to-data linking automatically, eliminating the need to manually join Runs and Measurements. The separate Extracted_Runs and Extracted_Measurements sheets remain available for backwards compatibility and for cases where the individual pipelines are preferred.
+```json
+{
+  "measurement_id": "M_001",
+  "run_id": "RUN_001",
+  "paper_id": "Smith_2024",
+  "experiment_type": "conjugation_assay",
+  "species": "Escherichia coli",
+  "strain_id": "K-12 MG1655",
+  "plasmid_name": "R388",
+  "medium": "LB broth",
+  "temperature": "37",
+  "field_name": "conjugation_rate",
+  "measurement_time_h": "4",
+  "raw_value": "1.2e-3",
+  "raw_units": "transconjugants/donor",
+  "source_in_paper": "Table 2",
+  "confidence": "high"
+}
+```
+
+Key fields: `field_name` identifies the measurement type, `raw_value` + `raw_units` carry the data, and `run_id` groups measurements from the same experimental condition. The run metadata columns (`species`, `strain_id`, `plasmid_name`, `medium`, etc.) are denormalized onto every row for easy filtering.
+
+### Export (Single-Paper Mode)
+
+`export-results` writes an Excel workbook with sheets:
+
+- **Combined_Runs_Measurements** — denormalized rows (recommended)
+- **Extracted_Measurements** — vision + text LLM candidates
+- **Extracted_Runs** — structured run metadata
+- **Export_Meta** — provenance and row counts

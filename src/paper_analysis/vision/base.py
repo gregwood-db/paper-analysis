@@ -8,6 +8,10 @@ from typing import Literal, Protocol
 from paper_analysis.prompts import (
     BOX_PLOT_SYSTEM,
     BOX_PLOT_USER,
+    CLASSIFY_SYSTEM,
+    CLASSIFY_USER,
+    HEATMAP_SYSTEM,
+    HEATMAP_USER,
     LINE_CHART_SYSTEM,
     LINE_CHART_USER,
     PLASMID_MAP_SYSTEM,
@@ -22,9 +26,11 @@ from paper_analysis.prompts import (
 from paper_analysis.plot_type_dispatch import ExtractionModel, parse_extraction_dict
 
 PlotType = Literal[
+    "auto",
     "box_plot",
     "line_chart",
     "line_plot",
+    "heatmap",
     "table_image",
     "plasmid_map",
     "workflow_diagram",
@@ -83,11 +89,18 @@ class VisionClient(Protocol):
     ) -> ExtractionModel: ...
 
 
+def classify_prompts() -> tuple[str, str]:
+    """Return the system/user prompts for figure-type classification."""
+    return CLASSIFY_SYSTEM, CLASSIFY_USER
+
+
 def _prompts_for(plot_type: PlotType) -> tuple[str, str]:
     if plot_type == "box_plot":
         return BOX_PLOT_SYSTEM, BOX_PLOT_USER
     if plot_type in ("line_chart", "line_plot"):
         return LINE_CHART_SYSTEM, LINE_CHART_USER
+    if plot_type == "heatmap":
+        return HEATMAP_SYSTEM, HEATMAP_USER
     if plot_type == "plasmid_map":
         return PLASMID_MAP_SYSTEM, PLASMID_MAP_USER
     if plot_type == "workflow_diagram":

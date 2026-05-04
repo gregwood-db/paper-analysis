@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 from paper_analysis.config import (
     AutoDiscoverConfig,
+    BatchConfig,
     PocConfig,
     effective_export_config,
     effective_text_config,
@@ -324,6 +325,99 @@ def list_images_cmd(
         return
     for item in infos:
         typer.echo(f"xref={item['xref']} bbox={item['bbox']}")
+
+
+@app.command("batch-run")
+def batch_run_cmd(
+    config: Path = typer.Option(
+        Path("config/batch.yaml"), "--config", "-c", exists=True
+    ),
+    papers: list[str] | None = typer.Option(
+        None,
+        "--paper",
+        "-p",
+        help="Process only these paper IDs or PDF stems (repeatable). Omit for all.",
+    ),
+    skip_vision: bool = typer.Option(
+        False,
+        "--skip-vision",
+        help="Skip figure discovery/extraction/vision (text-only combined extraction).",
+    ),
+) -> None:
+    """Run the full pipeline on all papers in the batch config."""
+    from paper_analysis.batch import run_batch
+
+    batch_cfg = BatchConfig.load(config.resolve())
+    run_batch(
+        batch_cfg,
+        papers=papers or None,
+        skip_vision=skip_vision,
+        echo=typer.echo,
+    )
+
+
+@app.command("batch-postprocess")
+def batch_postprocess_cmd(
+    config: Path = typer.Option(
+        Path("config/batch.yaml"), "--config", "-c", exists=True
+    ),
+    papers: list[str] | None = typer.Option(
+        None,
+        "--paper",
+        "-p",
+        help="Post-process only these paper IDs (repeatable). Omit for all.",
+    ),
+) -> None:
+    """Expand vision extraction data into measurement rows (no API calls).
+
+    Reads existing vision extraction JSONs and expands each data point
+    (line chart point, box plot median, heatmap cell) into individual
+    candidate rows, merging them into candidate_combined.json.
+    """
+    from paper_analysis.postprocess import run_postprocess_for_paper
+
+    batch_cfg = BatchConfig.load(config.resolve())
+    from paper_analysis.batch import list_pdfs
+
+    all_pdfs = list_pdfs(batch_cfg)
+    if papers:
+        filter_set = set(papers)
+        all_pdfs = [
+            (p, pid) for p, pid in all_pdfs
+            if pid in filter_set or p.stem in filter_set
+        ]
+
+    total_added = 0
+    for _, paper_id in all_pdfs:
+        ext_dir = batch_cfg.artifacts_dir / paper_id / "extractions"
+        combined_path = batch_cfg.artifacts_dir / paper_id / "text" / "candidate_combined.json"
+        n = run_postprocess_for_paper(
+            paper_id, ext_dir, combined_path,
+            mfl_path=batch_cfg.field_list_path,
+            echo=typer.echo,
+        )
+        total_added += n
+
+    typer.echo(f"\nPost-processing complete: {total_added} vision-expanded rows added across {len(all_pdfs)} papers.")
+
+
+@app.command("batch-evaluate")
+def batch_evaluate_cmd(
+    config: Path = typer.Option(
+        Path("config/batch.yaml"), "--config", "-c", exists=True
+    ),
+    show_gaps: bool = typer.Option(
+        True, "--gaps/--no-gaps", help="Show per-paper gap analysis."
+    ),
+) -> None:
+    """Evaluate batch extraction results against the ground truth spreadsheet."""
+    from paper_analysis.batch_evaluate import run_batch_evaluation
+
+    batch_cfg = BatchConfig.load(config.resolve())
+    metrics = run_batch_evaluation(batch_cfg)
+    typer.echo(metrics.summary())
+    if show_gaps:
+        typer.echo(metrics.gap_report())
 
 
 def main() -> None:

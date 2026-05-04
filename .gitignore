@@ -11,3 +11,5 @@ build/
 .ruff_cache/
 .venv/
 venv/
+batch_run_*.log
+PROMPT_ITERATION_LOG.md

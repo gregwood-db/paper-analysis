@@ -6,6 +6,7 @@ from typing import Any
 from paper_analysis.schemas import (
     BoxPlotExtraction,
     ExperimentalWorkflowExtraction,
+    HeatmapExtraction,
     LineChartExtraction,
     PlasmidMapExtraction,
     TableImageExtraction,
@@ -16,6 +17,7 @@ from paper_analysis.schemas import (
 ExtractionModel = (
     BoxPlotExtraction
     | LineChartExtraction
+    | HeatmapExtraction
     | TableImageExtraction
     | PlasmidMapExtraction
     | WorkflowDiagramExtraction
@@ -52,6 +54,15 @@ _PLOT_TYPE_ALIASES: dict[str, str] = {
     "protocol_diagram": "experimental_workflow",
     "bar_chart": "box_plot",
     "bar_plot": "box_plot",
+    "scatter_plot": "line_chart",
+    "scatter": "line_chart",
+    "stacked_bar": "box_plot",
+    "stacked_bar_chart": "box_plot",
+    "histogram": "box_plot",
+    "interaction_matrix": "heatmap",
+    "color_grid": "heatmap",
+    "correlation_matrix": "heatmap",
+    "matrix": "heatmap",
 }
 
 
@@ -75,5 +86,7 @@ def parse_extraction_dict(data: dict[str, Any], *, context: str) -> ExtractionMo
         return WorkflowDiagramExtraction.model_validate(data)
     if canonical == "experimental_workflow":
         return ExperimentalWorkflowExtraction.model_validate(data)
+    if canonical == "heatmap":
+        return HeatmapExtraction.model_validate(data)
     warn_unknown_plot_type(pt, context=context)
     return _coerce_unknown(data, pt)

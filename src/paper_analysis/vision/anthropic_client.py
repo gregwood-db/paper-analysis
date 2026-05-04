@@ -7,13 +7,41 @@ import anthropic
 from pydantic import ValidationError
 
 from paper_analysis.prompts import JSON_FIX_SUFFIX
-from paper_analysis.vision.base import PlotType, _prompts_for, parse_extraction_text
+from paper_analysis.vision.base import PlotType, _prompts_for, classify_prompts, parse_extraction_text
+
+_VALID_PLOT_TYPES = frozenset({
+    "box_plot", "line_chart", "line_plot", "heatmap", "table_image",
+    "plasmid_map", "workflow_diagram", "experimental_workflow",
+})
 
 
 class AnthropicVisionClient:
     def __init__(self, model: str | None = None) -> None:
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
         self._client = anthropic.Anthropic()
+
+    def _classify_figure(self, image_block: dict) -> str:
+        """Ask the model to classify the figure type before extraction."""
+        system, user_text = classify_prompts()
+        resp = self._client.messages.create(
+            model=self.model,
+            max_tokens=64,
+            system=system,
+            messages=[{
+                "role": "user",
+                "content": [image_block, {"type": "text", "text": user_text}],
+            }],
+        )
+        raw = "".join(
+            (getattr(b, "text", None) or "").strip()
+            for b in resp.content if b.type == "text"
+        ).strip().lower().replace(" ", "_")
+        if raw in _VALID_PLOT_TYPES:
+            return raw
+        for valid in _VALID_PLOT_TYPES:
+            if valid in raw:
+                return valid
+        return "table_image"
 
     def extract_figure(
         self,
@@ -22,7 +50,6 @@ class AnthropicVisionClient:
         *,
         max_retries: int = 1,
     ):
-        system, user_text = _prompts_for(plot_type)
         b64 = base64.standard_b64encode(image_png).decode("ascii")
         image_block = {
             "type": "image",
@@ -32,6 +59,10 @@ class AnthropicVisionClient:
                 "data": b64,
             },
         }
+        if plot_type == "auto":
+            plot_type = self._classify_figure(image_block)
+
+        system, user_text = _prompts_for(plot_type)
         attempts = max_retries + 1
         last_err: Exception | None = None
         for attempt in range(attempts):
@@ -47,12 +78,11 @@ class AnthropicVisionClient:
             ]
             resp = self._client.messages.create(
                 model=self.model,
-                max_tokens=8192,
+                max_tokens=16384,
                 system=system,
                 messages=messages,
             )
             blocks = [b for b in resp.content if b.type == "text"]
-            # Join all text blocks (some models/API versions split prose + JSON, or omit first block text).
             last_text = "\n".join(
                 (getattr(b, "text", None) or "").strip() for b in blocks
             ).strip()

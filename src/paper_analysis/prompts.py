@@ -31,7 +31,16 @@ Return exactly this JSON shape:
 
 LINE_CHART_SYSTEM = """You extract numeric data from scientific figure panels. Reply with a single JSON object only — no markdown fences, no commentary. Use null for unreadable values."""
 
-LINE_CHART_USER = """Extract all data from this line or scatter plot panel. For each series (line), read series name from legend if present. For each visible point, read x and y; include error bar low/high if shown.
+LINE_CHART_USER = """Extract ALL data from this line or scatter plot panel. Be MAXIMALLY EXHAUSTIVE.
+
+Rules:
+1. Identify EVERY series (line, curve, or set of connected markers). Read the series name from the legend or line labels.
+2. For EACH series, read EVERY visible data point at EVERY x-axis position (timepoint, concentration, etc.).
+3. If the x-axis has regular spacing (e.g. hours: 0, 2, 4, 6, ..., 48), read a y-value at EACH tick.
+4. Estimate y-values from the plotted position even when no exact label is printed.
+5. Include error bars (error_low / error_high) when visible — these are whiskers, shaded bands, or CI intervals.
+6. For dense plots with many series, do NOT skip any. If 8 conditions × 6 timepoints = 48 points, output all 48.
+7. Use log10 scale values if the axis is log-scale (e.g. y=1e-3 → y=-3 on a log10 axis, OR y=0.001 on a linear read).
 
 Return exactly this JSON shape (use "plot_type": "line_chart" or "line_plot" — same schema):
 {{
@@ -138,5 +147,46 @@ Return exactly this JSON shape:
   "other_visible_labels": [ string, ... ],
   "notes": string or null
 }}"""
+
+HEATMAP_SYSTEM = """You extract numeric data from heatmap, interaction matrix, and color-coded grid figures in scientific papers. Reply with a single JSON object only — no markdown fences, no commentary. Use null for unreadable values."""
+
+HEATMAP_USER = """This image is a heatmap, interaction matrix, or color-coded grid. Extract ALL cell values.
+
+Rules:
+1. Read all row labels (typically on the y-axis or left side).
+2. Read all column labels (typically on the x-axis or top).
+3. For EVERY cell in the matrix, read the numeric value from the color scale or any text annotation in the cell.
+4. If the color bar has a numeric scale (e.g. log10 conjugation rate from -8 to 0), estimate each cell's value from its color.
+5. Include cells that are empty, marked with X, or have special annotations (e.g. "ND" for not detected).
+6. For an N×M matrix, you should have N×M cells. Do NOT skip cells.
+
+Return exactly this JSON shape:
+{{
+  "plot_type": "heatmap",
+  "title_or_caption": string or null,
+  "axis_x_label": string or null,
+  "axis_y_label": string or null,
+  "value_label": string or null,
+  "value_units": string or null,
+  "row_labels": [ string, ... ],
+  "col_labels": [ string, ... ],
+  "cells": [
+    {{ "row_label": string, "col_label": string, "value": number or string or null, "annotation": string or null }}
+  ],
+  "notes": string or null
+}}"""
+
+CLASSIFY_SYSTEM = """You classify scientific figure types. Reply with ONLY the plot_type string — no JSON, no explanation."""
+
+CLASSIFY_USER = """What type of figure is this? Reply with exactly one of these labels:
+- box_plot (box-and-whisker plots, bar charts with error bars)
+- line_chart (line plots, scatter plots, growth curves, time-series)
+- heatmap (color-coded grids, interaction matrices, correlation matrices)
+- table_image (data table rendered as an image)
+- plasmid_map (circular/linear DNA diagrams)
+- workflow_diagram (flowcharts, pipeline schematics)
+- experimental_workflow (lab protocol diagrams)
+
+Reply with ONLY the label, nothing else."""
 
 JSON_FIX_SUFFIX = "\n\nYour previous reply was not valid JSON for the schema. Return only one corrected JSON object."

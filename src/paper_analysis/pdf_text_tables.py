@@ -257,6 +257,28 @@ def _summarize_table_image(data: dict[str, Any]) -> str:
     return "\n".join(lines) if lines else "  (empty table)"
 
 
+def _summarize_heatmap(data: dict[str, Any]) -> str:
+    val_label = data.get("value_label") or "?"
+    val_units = data.get("value_units") or ""
+    rows = data.get("row_labels", [])
+    cols = data.get("col_labels", [])
+    cells = data.get("cells", [])
+    lines = [
+        f"  Value: {val_label}" + (f" ({val_units})" if val_units else ""),
+        f"  Dimensions: {len(rows)} rows × {len(cols)} cols, {len(cells)} cells extracted",
+    ]
+    for c in cells:
+        rl = c.get("row_label", "?")
+        cl = c.get("col_label", "?")
+        v = c.get("value")
+        ann = c.get("annotation")
+        val_str = str(v) if v is not None else "null"
+        if ann:
+            val_str += f" [{ann}]"
+        lines.append(f"  - ({rl}, {cl}): {val_str}")
+    return "\n".join(lines)
+
+
 def _summarize_one_extraction(stem: str, data: dict[str, Any]) -> str:
     """Produce a concise text summary for one vision extraction JSON."""
     page = _page_from_stem(stem)
@@ -268,6 +290,8 @@ def _summarize_one_extraction(stem: str, data: dict[str, Any]) -> str:
         return f"{header}\n{_summarize_box_plot(data)}"
     if pt in ("line_chart", "line_plot"):
         return f"{header}\n{_summarize_line_chart(data)}"
+    if pt == "heatmap":
+        return f"{header}\n{_summarize_heatmap(data)}"
     if pt == "table_image":
         return f"{header}\n{_summarize_table_image(data)}"
     if pt == "plasmid_map":
@@ -352,6 +376,8 @@ def build_figure_summary(extractions_dir: Path) -> str:
             if not groups or all(g.get("median") is None for g in groups):
                 continue
         if pt in ("line_chart", "line_plot") and not data.get("series"):
+            continue
+        if pt == "heatmap" and not data.get("cells"):
             continue
         parts.append(_summarize_one_extraction(p.stem, data))
 

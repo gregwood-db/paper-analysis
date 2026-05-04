@@ -1,0 +1,62 @@
+# Batch processing config for all 15 papers.
+# Paths are resolved relative to the repository root (parent of config/).
+
+papers_dir: data/papers
+artifacts_dir: artifacts
+ground_truth_path: data/RUNS_MEASUREMENTS_15files.xlsx
+ground_truth_sheet: RUNS_MEASUREMENTS_Master
+field_list_path: data/MASTER_FIELD_LIST_Combined_15papers.xlsx
+
+# Filename -> Paper_ID mapping (must match Paper_ID in ground truth).
+paper_map:
+  - filename: Chen_2017.pdf
+    paper_id: "006_Chen_2017"
+  - filename: Dorado-Morales_2021.pdf
+    paper_id: "002_DoradoMorales_2021"
+  - filename: FRETER.pdf
+    paper_id: "007_Freter_1983"
+  - filename: Hardiman_2016.pdf
+    paper_id: "011_Hardiman_2016"
+  - filename: Igler_2020.pdf
+    paper_id: "008_Igler_2021"
+  - filename: Kosterlitz_2022.pdf
+    paper_id: "009_Kosterlitz_2022"
+  - filename: Leon-Sampedro_2021.pdf
+    paper_id: "012_Leon-Sampedro_2021"
+  - filename: Lobato_marquez_2016.pdf
+    paper_id: "013_Lobato-Marquez_2016"
+  - filename: Lopatkin_2017.pdf
+    paper_id: "014_Lopatkin_2017"
+  - filename: Valle_2021.pdf
+    paper_id: "001_Valle_2021"
+  - filename: Wein_2019.pdf
+    paper_id: "015_Wein_2019"
+  - filename: gama2017.pdf
+    paper_id: "003_Gama_2017"
+  - filename: hall_2020.pdf
+    paper_id: "005_Hall_2020"
+  - filename: milan_2018.pdf
+    paper_id: "004_Milan_2018"
+  - filename: wan_2011.pdf
+    paper_id: "010_Wan_2011"
+
+vision:
+  provider: anthropic
+  model: null
+
+auto_discover:
+  enabled: true
+  strategy: only_auto
+  default_plot_type: auto
+  pages: null
+  min_area_frac: 0.008
+  min_width_frac: 0.03
+  min_height_frac: 0.03
+  duplicate_merge_iou: 0.82
+  merge_fragments: false
+  include_vector_graphics: true
+  drawing_cluster_gap_frac: 0.012
+  padding_frac: 0.01
+  render_dpi: 200
+
+max_context_chars: 120000

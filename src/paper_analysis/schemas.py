@@ -6,8 +6,13 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 class BoxPlotGroup(BaseModel):
-    label: str
+    label: str = ""
     median: float | None = None
+
+    @field_validator("label", mode="before")
+    @classmethod
+    def _coerce_label(cls, v: Any) -> str:
+        return "" if v is None else str(v)
     q1: float | None = None
     q3: float | None = None
     whisker_low: float | None = None
@@ -141,6 +146,40 @@ class ExperimentalWorkflowExtraction(BaseModel):
     @field_validator("other_visible_labels", mode="before")
     @classmethod
     def _stringify_exp_workflow_labels(cls, v: Any) -> Any:
+        if not isinstance(v, list):
+            return v
+        return ["" if x is None else str(x) for x in v]
+
+
+class HeatmapCell(BaseModel):
+    """One cell in a heatmap / interaction matrix."""
+
+    row_label: str
+    col_label: str
+    value: float | str | None = None
+    annotation: str | None = None
+
+
+class HeatmapExtraction(BaseModel):
+    """Heatmap, interaction matrix, or color-coded grid figure."""
+
+    plot_type: Literal["heatmap"] = "heatmap"
+    title_or_caption: str | None = None
+    axis_x_label: str | None = None
+    axis_y_label: str | None = None
+    value_label: str | None = Field(
+        default=None,
+        description="Color bar label or what the values represent",
+    )
+    value_units: str | None = None
+    row_labels: list[str] = Field(default_factory=list)
+    col_labels: list[str] = Field(default_factory=list)
+    cells: list[HeatmapCell] = Field(default_factory=list)
+    notes: str | None = None
+
+    @field_validator("row_labels", "col_labels", mode="before")
+    @classmethod
+    def _stringify_labels(cls, v: Any) -> Any:
         if not isinstance(v, list):
             return v
         return ["" if x is None else str(x) for x in v]

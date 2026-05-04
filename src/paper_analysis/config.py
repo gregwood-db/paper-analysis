@@ -21,9 +21,11 @@ class FigureTarget(BaseModel):
     id: str
     page: int = Field(ge=1, description="1-based page index")
     plot_type: Literal[
+        "auto",
         "box_plot",
         "line_chart",
         "line_plot",
+        "heatmap",
         "table_image",
         "plasmid_map",
         "workflow_diagram",
@@ -108,16 +110,18 @@ class AutoDiscoverConfig(BaseModel):
         description="only_auto: ignore manual figures list; append_to_manual: manual first, then auto",
     )
     default_plot_type: Literal[
+        "auto",
         "box_plot",
         "line_chart",
         "line_plot",
+        "heatmap",
         "table_image",
         "plasmid_map",
         "workflow_diagram",
         "experimental_workflow",
     ] = Field(
-        default="box_plot",
-        description="Vision prompt type for every discovered region (override per-id for tables, plasmid maps, etc.)",
+        default="auto",
+        description="Vision prompt type for discovered regions. 'auto' classifies each figure before extraction.",
     )
     pages: list[int] | None = Field(
         default=None,
@@ -212,6 +216,79 @@ class PocConfig(BaseModel):
         project_root = path.parent.parent if path.parent.name == "config" else path.parent
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         return cls.model_validate(_resolve_paths(raw, project_root))
+
+
+class PaperEntry(BaseModel):
+    """Maps a PDF filename to its ground-truth Paper_ID."""
+
+    filename: str = Field(..., description="PDF filename in papers_dir (e.g. 'Chen_2017.pdf')")
+    paper_id: str = Field(..., description="Paper_ID matching ground truth (e.g. '006_Chen_2017')")
+
+
+class BatchConfig(BaseModel):
+    """Configuration for batch processing of multiple papers."""
+
+    papers_dir: Path = Path("data/papers")
+    artifacts_dir: Path = Path("artifacts")
+    ground_truth_path: Path = Path("data/RUNS_MEASUREMENTS_15files.xlsx")
+    ground_truth_sheet: str = "RUNS_MEASUREMENTS_Master"
+    field_list_path: Path | None = Field(
+        default=None,
+        description="Optional MASTER_FIELD_LIST Excel for field normalization guidance.",
+    )
+    paper_map: list[PaperEntry] = Field(
+        default_factory=list,
+        description="Explicit filename -> Paper_ID mapping. If empty, Paper_ID is inferred from filename.",
+    )
+
+    vision: VisionConfig = Field(default_factory=VisionConfig)
+    auto_discover: AutoDiscoverConfig | None = Field(
+        default_factory=lambda: AutoDiscoverConfig(enabled=True, strategy="only_auto"),
+    )
+    text: TextPipelineConfig | None = None
+    export: ExportConfig | None = None
+
+    max_context_chars: int = Field(default=120000, ge=8000, le=500000)
+
+    @classmethod
+    def load(cls, path: Path) -> "BatchConfig":
+        path = path.resolve()
+        project_root = path.parent.parent if path.parent.name == "config" else path.parent
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return cls.model_validate(_resolve_paths(raw, project_root))
+
+    def paper_id_for(self, pdf_filename: str) -> str:
+        """Look up Paper_ID from the map; fall back to deriving from filename stem."""
+        for entry in self.paper_map:
+            if entry.filename == pdf_filename:
+                return entry.paper_id
+        stem = Path(pdf_filename).stem
+        return stem
+
+    def poc_config_for_paper(self, pdf_path: Path, paper_id: str) -> PocConfig:
+        """Build a single-paper PocConfig with per-paper artifact dirs."""
+        paper_artifacts = self.artifacts_dir / paper_id
+        return PocConfig(
+            pdf=PdfConfig(path=pdf_path),
+            artifacts=ArtifactsConfig(
+                figures_dir=paper_artifacts / "figures",
+                extractions_dir=paper_artifacts / "extractions",
+            ),
+            figures=[],
+            auto_discover=self.auto_discover,
+            vision=self.vision,
+            text=TextPipelineConfig(
+                output_dir=paper_artifacts / "text",
+                max_context_chars=self.max_context_chars,
+                llm_model=(self.text.llm_model if self.text else None),
+            ),
+            export=ExportConfig(
+                output_path=paper_artifacts / "export" / "extractions.xlsx",
+                include_native_pdf_tables=(
+                    self.export.include_native_pdf_tables if self.export else True
+                ),
+            ),
+        )
 
 
 _PATH_KEYS = frozenset(
